@@ -60,13 +60,13 @@ jobs:
           # launches (no cmd window to linger or close-kills-the-server).
           # Terminal output is reconstructed in-process (AttachConsole,
           # internal/install/console_windows.go).
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS -H windowsgui" -o mibee-nvr-windows-amd64.exe ./cmd/mibee-nvr/ &
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS -H windowsgui" -o mibee-nvr.exe ./cmd/mibee-nvr/ &
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o mibee-nvr-darwin-arm64 ./cmd/mibee-nvr/ &
           CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o mibee-nvr-darwin-amd64 ./cmd/mibee-nvr/ &
           wait
           # Single-file windows installer (2026-09-18): the Setup exe IS the
           # server binary — a bare double-click installs (desktop_entry.go).
-          cp mibee-nvr-windows-amd64.exe "MiBeeNVR-Setup-${{ github.ref_name }}-windows-amd64.exe"
+          cp mibee-nvr.exe "MiBeeNVR-Setup-${{ github.ref_name }}-windows-amd64.exe"
 
       # ---- Home Assistant custom integration (HACS) --------------------------
       # HACS only discovers custom_components/ at the repository root; this
@@ -134,7 +134,7 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum mibee-nvr-amd64 mibee-nvr-arm64 mibee-nvr-armv7 \
-            mibee-nvr-windows-amd64.exe mibee-nvr-darwin-arm64 mibee-nvr-darwin-amd64 \
+            mibee-nvr.exe mibee-nvr-darwin-arm64 mibee-nvr-darwin-amd64 \
             "MiBeeNVR-Setup-${{ github.ref_name }}-windows-amd64.exe" \
             mibee-nvr_*.deb mibee-nvr-*.rpm \
             > checksums.txt
@@ -162,7 +162,7 @@ jobs:
             mibee-nvr-amd64
             mibee-nvr-arm64
             mibee-nvr-armv7
-            mibee-nvr-windows-amd64.exe
+            mibee-nvr.exe
             MiBeeNVR-Setup-${{ github.ref_name }}-windows-amd64.exe
             mibee-nvr-darwin-arm64
             mibee-nvr-darwin-amd64

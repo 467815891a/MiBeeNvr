@@ -56,7 +56,7 @@ cross-armv7: frontend
 # window (terminal output via AttachConsole, internal/install/console_windows.go).
 cross-windows: frontend
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GO_BUILD_FLAGS) -ldflags="$(LDFLAGS) -H windowsgui" -o $(BUILD_DIR)/mibee-nvr-windows-amd64.exe ./cmd/mibee-nvr/
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GO_BUILD_FLAGS) -ldflags="$(LDFLAGS) -H windowsgui" -o $(BUILD_DIR)/mibee-nvr.exe ./cmd/mibee-nvr/
 
 cross-darwin-arm64: frontend
 	@mkdir -p $(BUILD_DIR)
