@@ -26,6 +26,7 @@ import (
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/event"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/metrics"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // Target mirrors substream.Target's RTSP-relevant subset (kept local so the
@@ -602,6 +603,7 @@ func sampleFrames(ctx context.Context, cfg Config, target Target, fps float64, f
 		stall = 30 * time.Second
 	}
 	cmd := exec.CommandContext(ctx, cfg.FFmpegPath, args...)
+	procctl.HideConsoleWindow(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return 0, err

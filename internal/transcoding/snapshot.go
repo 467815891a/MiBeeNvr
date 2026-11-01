@@ -15,6 +15,8 @@ import (
 	"io"
 	"os/exec"
 	"time"
+
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // ErrFFmpegUnavailable is returned when FFmpeg is not installed: callers keep
@@ -82,6 +84,7 @@ func DecodeAUToJPEG(au [][]byte) ([]byte, error) {
 		"-c:v", "mjpeg", "-q:v", "3",
 		"pipe:1",
 	)
+	procctl.HideConsoleWindow(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

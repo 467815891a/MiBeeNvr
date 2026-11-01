@@ -16,6 +16,7 @@ import (
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/livetranscode"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/metrics"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/model"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/slogx"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/uvc"
 )
@@ -458,6 +459,9 @@ func (r *UVCRecorder) watermarkFilter() string {
 func (r *UVCRecorder) runFFmpeg(ctx context.Context, ffmpegPath, name string, deviceNumber int, forceMJPEG bool, format captureFormat) error {
 	args := buildFFmpegArgs(name, deviceNumber, forceMJPEG, format.Width, format.Height, format.FPS, r.cfg.Encoder, r.watermarkFilter())
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	// The NVR runs without a console (GUI subsystem) — an ffmpeg child would
+	// open a black console window on the taskbar for the whole capture.
+	procctl.HideConsoleWindow(cmd)
 	cmd.Stderr = nil // captured below via a pipe
 
 	stdout, err := cmd.StdoutPipe()
@@ -742,6 +746,7 @@ func (r *UVCRecorder) audioOnce(ctx context.Context) error {
 		"-c:a", "aac", "-b:a", "64k", "-f", "adts", "pipe:1",
 	}
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	procctl.HideConsoleWindow(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)

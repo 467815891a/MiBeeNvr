@@ -129,6 +129,7 @@ func (m *PeriodicMergeManager) ffmpegConcatMerge(ctx context.Context, segments [
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	procctl.SetProcessGroup(cmd)
+	procctl.HideConsoleWindow(cmd)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

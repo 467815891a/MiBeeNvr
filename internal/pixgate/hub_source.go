@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/model"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/streamhub"
 )
 
@@ -192,6 +193,7 @@ probe:
 
 	var stderr boundedBuf
 	cmd = exec.CommandContext(ctx, cfg.FFmpegPath, args...)
+	procctl.HideConsoleWindow(cmd)
 	if len(cfg.Env) > 0 {
 		cmd.Env = append(os.Environ(), cfg.Env...)
 	}

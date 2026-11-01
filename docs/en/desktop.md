@@ -49,6 +49,7 @@ The desktop editions treat themselves as **personal software on this machine** b
 | Can other devices on the LAN reach it? | Yes — change the listen address to `0.0.0.0:9090` in the tray/menubar first, then set a password |
 | Why does the page open without a login? | Passwordless loopback access (`local_bypass`) — expected desktop behavior; LAN access still requires a password |
 | Does it start at boot? | Yes — Windows registers a per-user login autostart plus a Start-menu shortcut; macOS uses a LaunchAgent (current user only, no admin rights needed) |
+| Will I see ffmpeg / black console windows on the taskbar? | No — the capture, transcoding and merge helpers (ffmpeg, ffprobe) and the PTZ helper (PowerShell) all start without a console window, so nothing shows up on the taskbar |
 | Any feature differences vs. the Docker edition? | Recording / live streaming / AI / integrations are identical; only the deployment form and trust model differ |
 
 ## Next Steps

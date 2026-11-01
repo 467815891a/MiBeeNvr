@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // getDownloadURL returns the FFmpeg static build URL for the platform.
@@ -372,6 +374,7 @@ func (d *Downloader) extractArchive(archivePath, toolsDir, url string) error {
 	} else if strings.HasSuffix(url, ".tar.xz") {
 		// Use xz command for decompression (pure Go xz not in stdlib)
 		cmd := exec.CommandContext(context.Background(), "xz", "-dc", archivePath)
+		procctl.HideConsoleWindow(cmd)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			return fmt.Errorf("xz stdout pipe: %w", err)
@@ -553,6 +556,7 @@ func (d *Downloader) getFFmpegVersion(path string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, path, "-version")
+	procctl.HideConsoleWindow(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err

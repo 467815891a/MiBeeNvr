@@ -40,6 +40,7 @@ import (
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/event"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/mediaprobe"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/metrics"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 const (
@@ -307,6 +308,7 @@ func (a *RecordingAuditor) runFFmpegDeepCheck(ctx context.Context, path string) 
 		"-t", strconv.Itoa(int(deepCheckSampleDur/time.Second)), // ffmpeg wants plain seconds, not Go durations
 		"-f", "null", "-",
 	)
+	procctl.HideConsoleWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil && ctx.Err() == nil {

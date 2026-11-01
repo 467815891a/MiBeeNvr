@@ -405,6 +405,7 @@ func (q *TranscodeQueue) runWorker(ctx context.Context, task *storage.TranscodeT
 
 	// Process group for clean kill — prevents orphaned FFmpeg on RPi
 	procctl.SetProcessGroup(cmd)
+	procctl.HideConsoleWindow(cmd)
 
 	// Capture stderr for progress parsing
 	stderr, err := cmd.StderrPipe()

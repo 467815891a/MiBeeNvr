@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 var (
@@ -258,6 +260,7 @@ func parseEncoderList(ffmpegPath string) (map[string]bool, string) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, "-encoders")
+	procctl.HideConsoleWindow(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -347,6 +350,7 @@ var smokeTestEncoder = func(ffmpegPath, encoder string) bool {
 		"-c:v", encoder,
 		"-f", "null", "-",
 	)
+	procctl.HideConsoleWindow(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -530,6 +534,7 @@ func parseDecoderList(ffmpegPath string) (map[string]bool, string) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, "-decoders")
+	procctl.HideConsoleWindow(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -594,6 +599,7 @@ var smokeTestDecoder = func(ffmpegPath, decoder string) bool {
 	gen := exec.CommandContext(ctx, ffmpegPath,
 		"-f", "lavfi", "-i", "color=c=black:s=320x240:d=0.2:r=10",
 		"-frames:v", "2", "-c:v", swEncoder, "-f", format, "-y", tmp)
+	procctl.HideConsoleWindow(gen)
 	var genStderr bytes.Buffer
 	gen.Stderr = &genStderr
 	if err := gen.Run(); err != nil {
@@ -603,6 +609,7 @@ var smokeTestDecoder = func(ffmpegPath, decoder string) bool {
 	}
 
 	dec := exec.CommandContext(ctx, ffmpegPath, decodeSmokeArgs(decoder, format, tmp)...)
+	procctl.HideConsoleWindow(dec)
 	var decStderr bytes.Buffer
 	dec.Stderr = &decStderr
 	if err := dec.Run(); err != nil {

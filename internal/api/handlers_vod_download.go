@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/model"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -422,6 +423,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // so an abandoned download does not leave an encoder behind.
 func runFFmpeg(ctx context.Context, w io.Writer, ffmpegPath string, args ...string) error {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	procctl.HideConsoleWindow(cmd)
 	cmd.Stdout = w
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

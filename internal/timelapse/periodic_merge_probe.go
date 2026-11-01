@@ -13,6 +13,7 @@ import (
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/mediaprobe"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/model"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // checkSegmentCompatibility checks if all segments have compatible resolution and codec.
@@ -87,6 +88,7 @@ func probeSegmentMetadata(ctx context.Context, filePath string) (width, height i
 	}
 
 	cmd := exec.CommandContext(ctx, "ffprobe", args...)
+	procctl.HideConsoleWindow(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return 0, 0, "", fmt.Errorf("ffprobe failed: %w", err)
@@ -142,6 +144,7 @@ func probeVideoFrameCount(ctx context.Context, filePath string) (int, error) {
 		"-of", "csv=p=0",
 		filePath,
 	)
+	procctl.HideConsoleWindow(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe frame count failed: %w", err)

@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // Mode is one capture mode advertised by a device's dshow pin: a resolution
@@ -39,6 +41,9 @@ func ListDeviceModes(ffmpegPath, deviceName string) ([]Mode, error) {
 	}
 	cmd := exec.Command(ffmpegPath, "-hide_banner", "-list_options", "true",
 		"-f", "dshow", "-i", fmt.Sprintf("video=%s", deviceName))
+	// No console window for this one-shot query (it used to flash on the
+	// taskbar every time the camera settings page asked for the mode list).
+	procctl.HideConsoleWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	_ = cmd.Run()

@@ -25,6 +25,7 @@ import (
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/mediaprobe"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/model"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // ghostPendingGrace is how long a pending row with a missing file survives
@@ -141,6 +142,7 @@ func (cm *CleanupManager) probeDuration(ctx context.Context, filePath string) fl
 		"-of", "default=noprint_wrappers=1:nokey=1",
 		filePath,
 	)
+	procctl.HideConsoleWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		logger.Warn("zero-duration repair: ffprobe failed", "path", filePath, "error", err)

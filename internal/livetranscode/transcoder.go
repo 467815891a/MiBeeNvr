@@ -192,6 +192,7 @@ func (lt *LiveTranscoder) Start(ctx context.Context) error {
 
 	lt.cmd = exec.CommandContext(ctx, ffmpegPath, args...)
 	procctl.SetProcessGroup(lt.cmd)
+	procctl.HideConsoleWindow(lt.cmd)
 
 	if runtime.GOOS == "windows" {
 		// Windows: os.Process cannot deliver SIGTERM (only Kill). Keep the

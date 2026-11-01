@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/mediaprobe"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // parseFloatFlexible parses a JSON number that may be a string or numeric value.
@@ -79,6 +80,7 @@ func getMediaInfoFFprobe(ffprobePath, filePath string) (*MediaInfo, error) {
 		"-of", "json",
 		filePath,
 	)
+	procctl.HideConsoleWindow(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe failed: %w", err)

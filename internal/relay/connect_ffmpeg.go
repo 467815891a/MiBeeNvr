@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // connectViaFFmpeg spawns an FFmpeg subprocess that pulls from the camera's
@@ -74,6 +76,7 @@ func (t *PushTarget) connectViaFFmpeg(ctx context.Context) error {
 	args = append(args, "-f", "flv", "-flvflags", "no_duration_filesize", targetURL)
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	procctl.HideConsoleWindow(cmd)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.setStatus(StatusError, "ffmpeg stderr pipe: "+err.Error())
@@ -130,9 +133,11 @@ func probeSourceVideoFPS(ffmpegPath, sourceURL string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, ffprobePath, "-hide_banner",
+	probeCmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner",
 		"-of", "csv=p=0", "-select_streams", "v:0",
-		"-show_entries", "stream=r_frame_rate", sourceURL).Output()
+		"-show_entries", "stream=r_frame_rate", sourceURL)
+	procctl.HideConsoleWindow(probeCmd)
+	out, err := probeCmd.Output()
 	if err != nil {
 		return 0
 	}

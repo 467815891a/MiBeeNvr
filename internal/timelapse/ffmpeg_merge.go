@@ -126,6 +126,7 @@ func (m *FFmpegMerger) encoderFallbackChain() []string {
 func (m *FFmpegMerger) runFFmpeg(ctx context.Context, args []string, outputPath string) error {
 	cmd := exec.CommandContext(ctx, m.caps.FFmpegPath, args...)
 	procctl.SetProcessGroup(cmd)
+	procctl.HideConsoleWindow(cmd)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

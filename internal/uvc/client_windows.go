@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/procctl"
 )
 
 // UVCController drives one UVC camera's PTZ controls through a resident
@@ -78,6 +80,10 @@ func (c *UVCController) start() error {
 	// -EncodedCommand takes base64-encoded UTF-16LE — immune to quoting.
 	encoded := base64.StdEncoding.EncodeToString(utf16Encoded(psHelperScript))
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded)
+	// The NVR has no console of its own (GUI subsystem) — without this the
+	// helper would open a console window on the taskbar for as long as it
+	// lives.
+	procctl.HideConsoleWindow(cmd)
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("uvc-ptz: stdin pipe: %w", err)
