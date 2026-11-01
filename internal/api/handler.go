@@ -34,6 +34,7 @@ import (
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/rtsp"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/storage"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/timelapse"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/uvc"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/viewer"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/vision"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/vod"
@@ -271,6 +272,15 @@ type Handler struct {
 	gb28181DeviceMgr  *platform.DeviceManager
 	gb28181Records    *gb28181.DeviceRecordService // device-recording domain (records/playback/download)
 	gb28181SessionMgr *platform.SessionManager
+	// uvcPTZTickers holds the per-camera emulated continuous-move loops for
+	// UVC cameras (handlers_uvc_ptz.go). UVC has no "move until told
+	// otherwise" verb, so press-and-hold is a ticker of relative steps that
+	// runs until the stop endpoint (or Close) cancels it.
+	uvcPTZMu      sync.Mutex
+	uvcPTZTickers map[string]*uvcPTZTicker
+	// uvcPTZClients caches the per-camera helper-backed PTZ controllers
+	// (uvc.UVCController — control calls run in a sacrificial subprocess).
+	uvcPTZClients map[string]*uvc.UVCController
 	// timeSync serves the camera time-sync endpoints (#time-sync); nil in
 	// tests → handlers answer 503.
 	timeSync TimeSyncOps
@@ -363,6 +373,9 @@ func (h *Handler) Close() {
 	if h.tlTrigger != nil {
 		h.tlTrigger.Close()
 	}
+	// Stop any emulated UVC continuous-move tickers (they outlive HTTP
+	// requests and must not leak goroutines through shutdown).
+	h.stopAllUVCPTZTickers()
 }
 
 // Routes returns a chi.Router with all routes registered.

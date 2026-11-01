@@ -551,8 +551,10 @@
              capabilities confirm PTZ support — otherwise a fixed (non-PTZ) bullet
              camera shows a dead PTZ pad while caps are still loading. GB28181
              cameras use the same /ptz endpoints — the backend routes them to
-             the GB/T 28181 DeviceControl transport (no ONVIF caps to consult). -->
-        {#if (isPtzSupported(camera) && (deviceCaps?.ptz ?? false)) || isGB28181Camera(camera)}
+             the GB/T 28181 DeviceControl transport (no ONVIF caps to consult).
+             UVC cameras likewise: the protocol catalog already gates ptz=true
+             and the backend routes them to the KSPROPERTY transport. -->
+        {#if (isPtzSupported(camera) && (deviceCaps?.ptz ?? false)) || isGB28181Camera(camera) || camera.protocol === 'uvc'}
           <div class="card">
             <PtzControl {cameraId} enabled={true} protocol={camera.protocol} />
           </div>

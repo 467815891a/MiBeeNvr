@@ -15,6 +15,21 @@ import (
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/timelapse"
 )
 
+// dbURLForConfig maps a camera config onto the DB url column. UVC cameras have
+// no network URL — a synthetic "uvc://<device-path-or-name>" identity is
+// persisted instead so the column is never empty. The YAML config remains the
+// source of truth for the actual device binding.
+func dbURLForConfig(cam config.CameraConfig) string {
+	if cam.Protocol == string(model.ProtoUVC) && strings.TrimSpace(cam.URL) == "" && cam.UVC != nil {
+		id := strings.TrimSpace(cam.UVC.DevicePath)
+		if id == "" {
+			id = strings.TrimSpace(cam.UVC.Device)
+		}
+		return "uvc://" + id
+	}
+	return cam.URL
+}
+
 // AddCamera adds a new camera to the manager, starts its recorder, and persists.
 // If cam.ID is empty, a new ID is generated automatically.
 // Returns the camera ID.
@@ -81,7 +96,7 @@ func (cm *CameraManager) AddCamera(ctx context.Context, cam config.CameraConfig)
 
 		// Persist to database
 		if cm.db != nil {
-			if err := cm.db.UpsertCamera(ctx, cam.ID, cam.Name, string(cam.Protocol), cam.Encoding, cam.URL, cam.Username, cam.Password, cam.ONVIFEndpoint, cam.ProfileToken, cam.StreamEncoding, cam.StableID); err != nil {
+			if err := cm.db.UpsertCamera(ctx, cam.ID, cam.Name, string(cam.Protocol), cam.Encoding, dbURLForConfig(cam), cam.Username, cam.Password, cam.ONVIFEndpoint, cam.ProfileToken, cam.StreamEncoding, cam.StableID); err != nil {
 				logger.Error("failed to upsert camera record", "camera_id", cam.ID, "error", err)
 			}
 			// Persist the activation_state column (UpsertCamera does not write it).
@@ -601,6 +616,14 @@ func (cm *CameraManager) UpdateCamera(ctx context.Context, cameraID string, upda
 	if updates.GB28181 != nil {
 		cam.GB28181 = *updates.GB28181
 	}
+	if updates.UVC != nil {
+		// The FFmpeg capturer binds the device and capture format at spawn —
+		// any binding change requires a recorder restart.
+		if cam.UVC == nil || *cam.UVC != *updates.UVC {
+			needsRestart = true
+		}
+		cam.UVC = updates.UVC
+	}
 	if updates.AudioEnabled != nil {
 		// The audio gate is read once at recorder construction (GB28181's
 		// passive recorder; RTSP's audio track setup) — toggling it requires
@@ -721,7 +744,7 @@ func (cm *CameraManager) UpdateCamera(ctx context.Context, cameraID string, upda
 
 	// Persist to database
 	if cm.db != nil {
-		if err := cm.db.UpsertCamera(ctx, cam.ID, cam.Name, string(cam.Protocol), cam.Encoding, cam.URL, cam.Username, cam.Password, cam.ONVIFEndpoint, cam.ProfileToken, cam.StreamEncoding, cam.StableID); err != nil {
+		if err := cm.db.UpsertCamera(ctx, cam.ID, cam.Name, string(cam.Protocol), cam.Encoding, dbURLForConfig(*cam), cam.Username, cam.Password, cam.ONVIFEndpoint, cam.ProfileToken, cam.StreamEncoding, cam.StableID); err != nil {
 			logger.Error("failed to upsert camera record", "camera_id", cam.ID, "error", err)
 		}
 		// Persist DB-only metadata fields

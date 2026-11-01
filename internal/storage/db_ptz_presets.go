@@ -10,11 +10,16 @@ import (
 // PTZPreset is a locally-managed preset row (camera_ptz_presets). Used by
 // protocols with no device-side preset query — notably GB28181, where the
 // platform picks the preset number and devices only understand set/call/del
-// commands (GB/T 28181-2016 § A.3.4).
+// commands (GB/T 28181-2016 § A.3.4), and UVC, where the NVR is the only
+// preset store.
 type PTZPreset struct {
 	CameraID  string
 	Token     string // preset number, "1".."255"
 	Name      string
+	// Position stores the absolute pan/tilt/zoom position as JSON
+	// ({"pan":…,"tilt":…,"zoom":…}) for protocols that need the NVR to
+	// replay it (UVC). '' = position unknown (device-side presets, GB28181).
+	Position  string
 	CreatedAt time.Time
 }
 
@@ -22,17 +27,17 @@ type PTZPreset struct {
 // token keeps its name).
 func (d *DB) InsertPTZPreset(ctx context.Context, p PTZPreset) error {
 	_, err := d.db.ExecContext(ctx, `INSERT OR IGNORE INTO camera_ptz_presets
-		(camera_id, token, name, created_at) VALUES (?, ?, ?, ?);`,
-		p.CameraID, p.Token, p.Name, timeToDB(p.CreatedAt))
+		(camera_id, token, name, position, created_at) VALUES (?, ?, ?, ?, ?);`,
+		p.CameraID, p.Token, p.Name, p.Position, timeToDB(p.CreatedAt))
 	return err
 }
 
 // UpsertPTZPreset adds or renames a preset for a camera.
 func (d *DB) UpsertPTZPreset(ctx context.Context, p PTZPreset) error {
 	_, err := d.db.ExecContext(ctx, `INSERT INTO camera_ptz_presets
-		(camera_id, token, name, created_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT(camera_id, token) DO UPDATE SET name=excluded.name;`,
-		p.CameraID, p.Token, p.Name, timeToDB(p.CreatedAt))
+		(camera_id, token, name, position, created_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(camera_id, token) DO UPDATE SET name=excluded.name, position=excluded.position;`,
+		p.CameraID, p.Token, p.Name, p.Position, timeToDB(p.CreatedAt))
 	return err
 }
 
@@ -45,7 +50,7 @@ func (d *DB) DeletePTZPreset(ctx context.Context, cameraID, token string) error 
 
 // ListPTZPresets returns a camera's presets ordered by numeric token.
 func (d *DB) ListPTZPresets(ctx context.Context, cameraID string) ([]PTZPreset, error) {
-	rows, err := d.readConn().QueryContext(ctx, `SELECT camera_id, token, name, created_at
+	rows, err := d.readConn().QueryContext(ctx, `SELECT camera_id, token, name, COALESCE(position, ''), created_at
 		FROM camera_ptz_presets WHERE camera_id=? ORDER BY CAST(token AS INTEGER);`, cameraID)
 	if err != nil {
 		return nil, err
@@ -55,7 +60,7 @@ func (d *DB) ListPTZPresets(ctx context.Context, cameraID string) ([]PTZPreset, 
 	for rows.Next() {
 		var p PTZPreset
 		var createdAt string
-		if err := rows.Scan(&p.CameraID, &p.Token, &p.Name, &createdAt); err != nil {
+		if err := rows.Scan(&p.CameraID, &p.Token, &p.Name, &p.Position, &createdAt); err != nil {
 			return nil, err
 		}
 		p.CreatedAt = scanTime(sql.NullString{String: createdAt, Valid: createdAt != ""})

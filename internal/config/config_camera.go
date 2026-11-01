@@ -92,6 +92,13 @@ type CameraConfig struct {
 	// and ingests its RTP/PS stream. URL is not used.
 	GB28181 GB28181ChannelConfig `yaml:"gb28181,omitempty" json:"gb28181,omitempty"`
 
+	// UVC-specific camera fields (only used when protocol is "uvc"): a local
+	// USB (UVC) camera captured by the internal FFmpeg capturer. URL is not
+	// used — the device is identified by its DirectShow friendly name and/or
+	// stable device path. PTZ rides the UVC camera controls
+	// (DirectShow IAMCameraControl on Windows).
+	UVC *UVCConfig `yaml:"uvc,omitempty" json:"uvc,omitempty"`
+
 	// Dark frame filtering: skip recording segments that are too dark to be useful
 	// (night without IR capability). Only applies to MJPEG/AVI cameras.
 	// When enabled, each segment is brightness-checked at close time; dark segments
@@ -270,6 +277,34 @@ type AdaptiveRecordingConfig struct {
 	// (POST /api/cameras/{id}/adaptive/trigger) resume full-rate. nil/unset
 	// = enabled (video exits work as before).
 	VideoExit *bool `yaml:"video_exit,omitempty" json:"video_exit,omitempty"`
+}
+
+// UVCConfig holds the device binding for a protocol "uvc" camera (a local USB
+// webcam / UVC PTZ camera). The stream is captured by an internal FFmpeg
+// subprocess (DirectShow input on Windows) and transcoded to H.264 before it
+// enters the pipeline.
+type UVCConfig struct {
+	// Device is the DirectShow friendly name of the capture device (e.g.
+	// "HD Pro Webcam C920"). Required (unless DevicePath is set). Duplicates
+	// are disambiguated with FFmpeg's video_device_number at capture start.
+	Device string `yaml:"device,omitempty" json:"device,omitempty"`
+	// AudioDevice is the DirectShow friendly name of the microphone to record
+	// when AudioEnabled is set (e.g. the camera's own speakerphone or a USB
+	// mic). Empty = no audio capture.
+	AudioDevice string `yaml:"audio_device,omitempty" json:"audio_device,omitempty"`
+	// DevicePath is the stable DirectShow symbolic link (e.g.
+	// `\\?\usb#vid_046d&pid_0825#...#{...}`) from GET /api/uvc/devices. It
+	// survives replug and re-enumeration, so it is preferred over Device for
+	// identity: at capture start the current friendly name is resolved from it.
+	DevicePath string `yaml:"device_path,omitempty" json:"device_path,omitempty"`
+	// Width/Height/FPS optionally pin the capture format (e.g. 1920/1080/30).
+	// 0 = let FFmpeg pick the device default.
+	Width  int `yaml:"width,omitempty" json:"width,omitempty"`
+	Height int `yaml:"height,omitempty" json:"height,omitempty"`
+	FPS    int `yaml:"fps,omitempty" json:"fps,omitempty"`
+	// Encoder selects the H.264 encoder for the capture→pipeline transcode:
+	// "" | "libx264" (default, software) | "h264_qsv" (Intel Quick Sync).
+	Encoder string `yaml:"encoder,omitempty" json:"encoder,omitempty"`
 }
 
 // CameraPixgateConfig arms the pixel-domain fine gate (#636): a low-rate

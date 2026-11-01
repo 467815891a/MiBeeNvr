@@ -284,8 +284,15 @@ func (d *DB) ReadPoolStats() (sql.DBStats, bool) {
 // association). Both are pure additions with idempotent ensures; the
 // baseline CREATE covers fresh installs either way.
 //
+// v44 (uvc): added camera_ptz_presets.position — the stored absolute
+// pan/tilt/zoom position for locally-managed presets on UVC cameras
+// (protocol "uvc" has no device-side preset memory; the NVR is the store).
+// JSON-encoded {"pan":…,"tilt":…,"zoom":…}, '' = position unknown (GB28181
+// rows). Pure addition with idempotent ensure; the baseline CREATE covers
+// fresh installs.
+//
 // The schema_meta table tracks the schema version for future migrations.
-const currentSchemaVersion = "43"
+const currentSchemaVersion = "44"
 
 func (d *DB) Init(ctx context.Context) error {
 	// ── Tables (full baseline — new installs get the final schema in one step) ──
@@ -481,11 +488,14 @@ func (d *DB) Init(ctx context.Context) error {
 	);`
 
 	// Local PTZ preset registry for protocols without device-side preset
-	// queries (GB28181). token = the preset number sent in the A.3.4 command.
+	// queries (GB28181, UVC). token = the preset number sent in the A.3.4
+	// command; position (v44) stores the absolute pan/tilt/zoom JSON for
+	// UVC cameras, whose presets live only in the NVR.
 	ptzPresetsSQL := `CREATE TABLE IF NOT EXISTS camera_ptz_presets (
 		camera_id TEXT NOT NULL,
 		token TEXT NOT NULL,
 		name TEXT NOT NULL DEFAULT '',
+		position TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		PRIMARY KEY (camera_id, token)
 	);`
@@ -647,6 +657,21 @@ func (d *DB) Init(ctx context.Context) error {
 	// ── Column backfill for pre-v43 databases: cameras.audio_link_camera_id ──
 	if err := d.ensureCameraAudioLinkColumn(ctx); err != nil {
 		return err
+	}
+
+	// ── v44 (uvc): camera_ptz_presets.position (stored absolute PTZ preset
+	// positions for UVC cameras) ──
+	var presetPosCol int
+	if err := d.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('camera_ptz_presets') WHERE name='position'`,
+	).Scan(&presetPosCol); err != nil {
+		return fmt.Errorf("check camera_ptz_presets.position column: %w", err)
+	}
+	if presetPosCol == 0 {
+		if _, err := d.db.ExecContext(ctx,
+			`ALTER TABLE camera_ptz_presets ADD COLUMN position TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add camera_ptz_presets.position column: %w", err)
+		}
 	}
 
 	_, _ = d.db.ExecContext(ctx, "UPDATE schema_meta SET value=? WHERE key='schema_version'", currentSchemaVersion)

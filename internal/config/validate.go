@@ -180,7 +180,8 @@ func validateConfigDetails(cfg *Config) error {
 		if strings.TrimSpace(c.URL) == "" && c.Protocol != "onvif" && c.Protocol != "xiaomi" &&
 			c.Protocol != string(model.ProtoSRT) && c.Protocol != string(model.ProtoRTMP) &&
 			c.Protocol != string(model.ProtoWHIP) &&
-			c.Protocol != string(model.ProtoGB28181) {
+			c.Protocol != string(model.ProtoGB28181) &&
+			c.Protocol != string(model.ProtoUVC) {
 			return fmt.Errorf("camera[%d].url is required", i)
 		}
 		// Validate URL format if set
@@ -236,6 +237,25 @@ func validateConfigDetails(cfg *Config) error {
 			}
 			if strings.TrimSpace(c.GB28181.ChannelID) == "" {
 				return fmt.Errorf("camera[%d].gb28181.channel_id is required for gb28181 cameras", i)
+			}
+		}
+
+		// Validate UVC-specific camera fields: a local USB capture device has no
+		// URL — it is identified by friendly name and/or stable device path.
+		if c.Protocol == string(model.ProtoUVC) {
+			if c.UVC == nil {
+				return fmt.Errorf("camera[%d].uvc is required for uvc cameras (device name or device_path)", i)
+			}
+			if strings.TrimSpace(c.UVC.Device) == "" && strings.TrimSpace(c.UVC.DevicePath) == "" {
+				return fmt.Errorf("camera[%d].uvc.device or uvc.device_path is required for uvc cameras", i)
+			}
+			if c.UVC.Width < 0 || c.UVC.Height < 0 || c.UVC.FPS < 0 {
+				return fmt.Errorf("camera[%d].uvc width/height/fps must be >= 0 (0 = device default)", i)
+			}
+			switch c.UVC.Encoder {
+			case "", "libx264", "h264_qsv":
+			default:
+				return fmt.Errorf("camera[%d].uvc.encoder must be \"libx264\" or \"h264_qsv\" (got %q)", i, c.UVC.Encoder)
 			}
 		}
 

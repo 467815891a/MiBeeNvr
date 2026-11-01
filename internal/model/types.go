@@ -310,6 +310,12 @@ const (
 	ProtoRTMP    Protocol = "rtmp"
 	ProtoWHIP    Protocol = "whip"
 	ProtoGB28181 Protocol = "gb28181"
+	// ProtoUVC is a local USB (UVC) camera captured directly by the NVR via
+	// FFmpeg's DirectShow input (Windows; v4l2 on Linux is a follow-up).
+	// Unlike the pull protocols above there is no network URL — the device is
+	// identified by its UVC device path / DirectShow friendly name. PTZ rides
+	// the UVC CameraTerminal controls (DirectShow IAMCameraControl).
+	ProtoUVC Protocol = "uvc"
 )
 
 // Encoding constants
@@ -444,6 +450,9 @@ var ValidEncodingsForProtocol = map[string][]string{
 	// "audio" is the voice-input channel form (network pickup, GB type code
 	// 136): a lone m=audio INVITE feeding the standalone-audio pipeline.
 	string(ProtoGB28181): {string(FormatH264), string(FormatH265), string(FormatAudio)},
+	// UVC local USB capture is always transcoded (or copied) to H.264 by the
+	// internal FFmpeg capturer before it enters the pipeline.
+	string(ProtoUVC): {string(FormatH264)},
 }
 
 // ValidateProtocolEncoding checks if the protocol+encoding combination is valid.

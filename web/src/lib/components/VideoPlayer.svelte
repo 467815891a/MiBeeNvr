@@ -311,9 +311,11 @@ streamState = 'error';
     const _proto = cameraProtocol;
     if (!_url || !_proto) return;
 
-    // Only HLS protocols
-    const hlsProtocols = ['rtsp_h264', 'rtsp_h265', 'onvif', 'rtsp', 'xiaomi'];
-    if (!hlsProtocols.includes(_proto)) return;
+    // No protocol whitelist here: the parent only mounts this player when the
+    // orchestrator selected an HLS mode, and the backend /protocols response
+    // already gated availability by codec. A hardcoded legacy list here
+    // silently blocked newer protocols (uvc, gb28181, srt/rtmp/whip) — the
+    // video element mounted but initHls() never ran (readyState 0, no picture).
 
     // New stream URL = fresh retry budget. Reset the give-up flag so a camera
     // that previously exhausted retries (e.g. was unreachable, now recovered

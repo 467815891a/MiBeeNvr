@@ -96,6 +96,7 @@ func injectYAMLConfigFields(row *storage.CameraRow, cfg *config.Config) {
 			gb := cam.GB28181
 			row.GB28181 = &gb
 		}
+		row.UVC = cam.UVC
 		return
 	}
 }
@@ -254,6 +255,8 @@ var validProtocols = map[string]bool{
 	"timelapse": true,
 	// GB/T 28181 SIP-registered devices (no URL — identified by DeviceID/ChannelID)
 	"gb28181": true,
+	// Local USB (UVC) cameras (no URL — identified by DirectShow device name/path)
+	"uvc": true,
 }
 
 // gb28181ChannelPayload is the API shape of a camera's GB28181 binding.
@@ -427,6 +430,8 @@ func (h *Handler) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 		SubnetHints *[]string `json:"subnet_hints"`
 		// GB28181 SIP device/channel binding
 		GB28181 *gb28181ChannelPayload `json:"gb28181"`
+		// UVC device binding (protocol "uvc"): replace the whole block when set.
+		UVC *config.UVCConfig `json:"uvc"`
 		// Group label (v36, camera-management grouping). nil = unchanged;
 		// empty string = ungroup.
 		Group *string `json:"group"`
@@ -543,6 +548,7 @@ func (h *Handler) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 		PushRetentionDays:      body.PushRetentionDays,
 		VisionTargets:          body.VisionTargets,
 		GB28181:                body.GB28181.toConfigPtr(),
+		UVC:                    body.UVC,
 		Group:                  body.Group,
 		AudioLinkCameraID:      body.AudioLinkCameraID,
 	}
@@ -603,11 +609,21 @@ func (h *Handler) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 		if body.Protocol != nil {
 			proto = *body.Protocol
 		}
-		if proto != "onvif" && proto != "srt" && proto != "rtmp" && proto != "whip" && proto != "gb28181" {
+		if proto != "onvif" && proto != "srt" && proto != "rtmp" && proto != "whip" && proto != "gb28181" && proto != string(model.ProtoUVC) {
 			if !validateURL(*body.URL) {
 				WriteError(w, http.StatusBadRequest, "invalid URL format")
 				return
 			}
+		}
+	}
+
+	// UVC cameras: the capture device is the identity — never store a URL. If
+	// the caller flips the protocol to uvc (or edits a uvc camera), clear any
+	// stale URL so the YAML stays consistent with the create path.
+	if (body.Protocol != nil && *body.Protocol == string(model.ProtoUVC)) || body.UVC != nil {
+		if cur := h.camMgr.GetCameraConfig(id); cur != nil && cur.Protocol == string(model.ProtoUVC) {
+			emptyURL := ""
+			updates.URL = &emptyURL
 		}
 	}
 

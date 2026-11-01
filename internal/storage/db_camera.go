@@ -111,6 +111,9 @@ type CameraRow struct {
 	// Without it the camera edit form cannot show the DeviceID/ChannelID a
 	// gb28181 camera is bound to (always-empty fields, forced re-entry).
 	GB28181 *config.GB28181ChannelConfig `json:"gb28181,omitempty"`
+	// UVC device binding, injected from YAML at API response time. Without it
+	// the edit form cannot show which local device a uvc camera captures.
+	UVC *config.UVCConfig `json:"uvc,omitempty"`
 	// GroupName is the camera-management grouping label (v36). UI organization
 	// only — the recorder never reads it. '' = ungrouped.
 	GroupName string `json:"group,omitempty"`

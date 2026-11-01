@@ -514,6 +514,18 @@ func (h *Handler) handleProtocols(w http.ResponseWriter, r *http.Request) {
 			// camera PTZ endpoints which dispatch to DeviceControl.
 			Capabilities: map[string]bool{"hls": true, "ptz": true, "snapshot": false, "discovery": false, "auth": false},
 		},
+		{
+			ID:        "uvc",
+			Label:     "USB (UVC)",
+			Encodings: []string{"h264"},
+			BuiltIn:   true,
+			// Local USB (UVC) cameras: captured directly by the NVR through
+			// FFmpeg's DirectShow input — no URL or credentials. PTZ rides the
+			// standard camera PTZ endpoints which dispatch to the UVC camera
+			// controls (DirectShow IAMCameraControl). discovery=true: the
+			// add-form lists locally attached devices via GET /api/uvc/devices.
+			Capabilities: map[string]bool{"hls": true, "ptz": true, "snapshot": false, "discovery": true, "auth": false},
+		},
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -591,6 +603,9 @@ func (h *Handler) registerSystemRoutes(r chi.Router) {
 	r.Post("/api/backup", h.handleBackup)
 	r.Get("/api/backups", h.handleListBackups)
 	r.Get("/api/protocols", h.handleProtocols)
+	r.Get("/api/uvc/devices", h.handleUVCDevices)
+	r.Get("/api/uvc/device-modes", h.handleUVCDeviceModes)
+	r.Get("/api/uvc/audio-devices", h.handleUVCAudioDevices)
 	r.Get("/api/features", h.handleGetFeatures)
 	r.Put("/api/features", h.handleUpdateFeatures)
 	r.Get("/api/version", h.handleVersion)

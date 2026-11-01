@@ -4,7 +4,7 @@
   import type { Camera, ProtocolInfo, CameraProtocolsResponse } from '$lib/api';
   import { t } from '$lib/i18n';
   import { showToast } from '$lib/toast.svelte';
-  import { Loader2, AlertCircle, Video, VideoOff, X, Settings, ImageOff, CircleCheck, CirclePause, Search, Plus } from 'lucide-svelte';
+  import { Loader2, AlertCircle, Video, VideoOff, X, Settings, ImageOff, CircleCheck, CirclePause, Search, Plus, Move } from 'lucide-svelte';
   import PtzControl from '$lib/components/PtzControl.svelte';
   import CameraPlayer from '$lib/components/CameraPlayer.svelte';
   import { formatDate } from '$lib/format';
@@ -448,6 +448,10 @@
     ptzOpenIndex = -1;
   }
 
+  function togglePtz(index: number) {
+    ptzOpenIndex = ptzOpenIndex === index ? -1 : index;
+  }
+
 
   // --- Lifecycle ---
 
@@ -882,6 +886,17 @@
                 <span class="w-2 h-2 rounded-full flex-shrink-0" style="background-color: {healthColor}"></span>
                 {hs}
               </span>
+            {/if}
+
+            <!-- PTZ toggle (hover, bottom-right) for PTZ-capable cameras -->
+            {#if getProtocolCapabilities(camera.protocol, protocolsMap).ptz && ptzOpenIndex !== index}
+              <button
+                class="absolute bottom-2 right-2 z-10 p-1.5 rounded-full bg-black/60 text-white/80 hover:text-white hover:bg-black/90 transition-all opacity-0 group-hover:opacity-100"
+                title={t('ptz.control')}
+                onclick={(e: MouseEvent) => { e.stopPropagation(); togglePtz(index); }}
+              >
+                <Move size={14} />
+              </button>
             {/if}
 
             <!-- PTZ Overlay for PTZ-capable cameras -->

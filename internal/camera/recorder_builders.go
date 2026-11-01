@@ -1,6 +1,7 @@
 package camera
 
 import (
+	"strings"
 	"time"
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/config"
@@ -27,6 +28,7 @@ var recorderBuilders = map[string]recorderBuilder{
 	string(model.ProtoSRT):       (*CameraManager).buildIngestRecorder,
 	string(model.ProtoRTMP):      (*CameraManager).buildIngestRecorder,
 	string(model.ProtoWHIP):      (*CameraManager).buildIngestRecorder,
+	string(model.ProtoUVC):       (*CameraManager).buildUVCRecorder,
 }
 
 // resolveAdaptiveConfig parses the YAML adaptive-recording overrides into the
@@ -353,6 +355,37 @@ func (cm *CameraManager) buildIngestRecorder(cam config.CameraConfig, segDur tim
 	return recorder.NewIngestRecorder(recorder.IngestConfig{
 		CameraID:      cam.ID,
 		Encoding:      enc,
+		SegmentDur:    segDur,
+		Store:         cm.store,
+		DB:            cm.db,
+		Metrics:       cm.metrics,
+		EventBus:      cm.eventBus,
+		RecordEnabled: cam.RecordingEnabled,
+	})
+}
+
+// buildUVCRecorder builds the local USB (UVC) capture recorder: an internal
+// FFmpeg dshow capturer feeding an inner ingest recorder, so StreamHub
+// fan-out, segment recording and health work exactly like the push protocols.
+func (cm *CameraManager) buildUVCRecorder(cam config.CameraConfig, segDur time.Duration) model.Recorder {
+	if cam.UVC == nil {
+		return nil
+	}
+	ffmpegPath := ""
+	if cm.cfg != nil {
+		ffmpegPath = cm.cfg.Transcoding.FFmpegPath
+	}
+	return recorder.NewUVCRecorder(recorder.UVCRecorderConfig{
+		CameraID:      cam.ID,
+		DevicePath:    cam.UVC.DevicePath,
+		DeviceName:    cam.UVC.Device,
+		Width:         cam.UVC.Width,
+		Height:        cam.UVC.Height,
+		FPS:           cam.UVC.FPS,
+		Encoder:       cam.UVC.Encoder,
+		FFmpegPath:    ffmpegPath,
+		AudioDevice:   cam.UVC.AudioDevice,
+		AudioEnabled:  cam.AudioEnabled && strings.TrimSpace(cam.UVC.AudioDevice) != "",
 		SegmentDur:    segDur,
 		Store:         cm.store,
 		DB:            cm.db,

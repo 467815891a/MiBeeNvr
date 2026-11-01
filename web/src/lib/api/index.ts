@@ -108,6 +108,10 @@ export {
   getAudioUpstreamWS,
   // Xiaomi device info
   getXiaomiDeviceInfo,
+  // UVC local USB cameras
+  listUVCDevices,
+  getUVCDeviceModes,
+  listUVCAudioDevices,
 } from './cameras';
 export type {
   CameraTranscodingConfig,
@@ -162,6 +166,10 @@ export type {
   // Xiaomi PTZ
   XiaomiPtzMoveRequest,
   XiaomiDeviceInfo,
+  // UVC local USB cameras
+  UVCDeviceConfig,
+  UVCDevice,
+  UVCDeviceMode,
 } from './cameras';
 // Recordings — list, download, frames, stats, archives
 export {
@@ -173,6 +181,7 @@ export {
   getRecordingVideoUrl,
   getMergedRecordingUrl,
   getCameraPlaybackPlaylistURL,
+  getCameraRangeDownloadURL,
   probeMergedRecordingCodec,
   clearMergedCodecCache,
   downloadRecording,

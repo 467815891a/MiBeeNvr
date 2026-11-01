@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/onvif"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/uvc"
 )
 
 // motorController is implemented by Xiaomi recorders (MotorControl direction:
@@ -12,6 +13,12 @@ import (
 type motorController interface {
 	MotorControl(direction string, speed int) error
 }
+
+// uvcCascadeBurstSteps is the relative pan/tilt step count per forwarded GB
+// DeviceControl. Upper platforms send repeated commands while the operator
+// holds the pad and "stop" on release, so per-command bursts compose into
+// continuous movement with native-feeling responsiveness.
+const uvcCascadeBurstSteps = 3
 
 // ForwardPTZ routes a decoded GB/T 28181 PTZ command to a local camera's
 // native PTZ control — the bridge used by the GB28181 cascade when the upper
@@ -21,7 +28,9 @@ type motorController interface {
 //     (gbSend, SIP MESSAGE to the device);
 //   - ONVIF cameras: ContinuousMove / Stop with the direction mapped onto a
 //     normalized velocity vector;
-//   - Xiaomi cameras: MotorControl.
+//   - Xiaomi cameras: MotorControl;
+//   - UVC cameras: a short relative-step burst (UVC controls are one-shot;
+//     repeated GB commands compose into continuous movement).
 //
 // speed is the GB command byte (0-255); ONVIF/Xiaomi normalize it to their own
 // scales.
@@ -79,6 +88,49 @@ func ForwardPTZ(ctx context.Context, cm *CameraManager, gbSend func(channelID, d
 		default:
 			return fmt.Errorf("direction %q not supported by Xiaomi motor", direction)
 		}
+
+	case "uvc":
+		if cfg.UVC == nil {
+			return fmt.Errorf("camera %q has no UVC device binding", cameraID)
+		}
+		// Control calls run in the sacrificial uvc-ptz helper subprocess —
+		// same rationale as the API PTZ path (vendor proxies can crash).
+		// Cascade commands are low-frequency, so a short-lived controller
+		// (one helper spawn per command) is the simple correct shape.
+		dev := uvc.Device{Name: cfg.UVC.Device, Path: cfg.UVC.DevicePath}
+		ctrl := uvc.NewUVCController(dev)
+		defer ctrl.Stop()
+		switch direction {
+		case "stop":
+			// UVC relative steps complete on their own — nothing to halt.
+			return nil
+		case "zoom-in":
+			return ctrl.ZoomStep(1)
+		case "zoom-out":
+			return ctrl.ZoomStep(-1)
+		}
+		pan, tilt := 0, 0
+		switch direction {
+		case "up":
+			tilt = uvcCascadeBurstSteps
+		case "down":
+			tilt = -uvcCascadeBurstSteps
+		case "left":
+			pan = -uvcCascadeBurstSteps
+		case "right":
+			pan = uvcCascadeBurstSteps
+		case "up-left":
+			pan, tilt = -uvcCascadeBurstSteps, uvcCascadeBurstSteps
+		case "up-right":
+			pan, tilt = uvcCascadeBurstSteps, uvcCascadeBurstSteps
+		case "down-left":
+			pan, tilt = -uvcCascadeBurstSteps, -uvcCascadeBurstSteps
+		case "down-right":
+			pan, tilt = uvcCascadeBurstSteps, -uvcCascadeBurstSteps
+		default:
+			return fmt.Errorf("direction %q not supported by UVC PTZ forward", direction)
+		}
+		return ctrl.MoveBy(pan, tilt)
 
 	default:
 		return fmt.Errorf("camera %q (protocol %q) has no PTZ support", cameraID, cfg.Protocol)

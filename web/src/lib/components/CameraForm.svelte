@@ -12,6 +12,9 @@
         getCameraTime,
         syncCameraTime,
         pointCameraAtNVR,
+        listUVCDevices,
+        getUVCDeviceModes,
+        listUVCAudioDevices,
     } from '$lib/api';
     import type { CameraTimeStatus } from '$lib/api';
     import type {
@@ -26,6 +29,9 @@
         AdaptiveRecordingConfig,
         CameraAudioTriggerConfig,
         CameraPixgateConfig,
+        UVCDevice,
+        UVCDeviceConfig,
+        UVCDeviceMode,
     } from '$lib/api';
     import { Eye, EyeOff, PlugZap, Layers, Brain } from 'lucide-svelte';
     import { showToast } from '$lib/toast.svelte';
@@ -162,6 +168,170 @@
   // GB28181 SIP device/channel binding (required when protocol is gb28181)
   let formGB28181DeviceID = $state('');
   let formGB28181ChannelID = $state('');
+  // UVC local USB device binding (protocol "uvc"): the stable device path is
+  // the identity (survives replug/rename); the friendly name is kept as the
+  // display/fallback. Empty path = the user typed a device name manually.
+  let formUVCDevicePath = $state('');
+  let formUVCDeviceName = $state('');
+  let formUVCWidth = $state('');
+  let formUVCHeight = $state('');
+  let formUVCFPS = $state('');
+  let formUVCEncoder = $state('');
+  let uvcDevices = $state<UVCDevice[]>([]);
+  let uvcDevicesLoading = $state(false);
+  let uvcDevicesError = $state('');
+  // Device-supported capture modes (resolution × fps combos from the device's
+  // dshow pin capabilities) — offered as cascading presets instead of
+  // free-text inputs. Empty when the query fails → manual inputs fall back.
+  let uvcModes = $state<UVCDeviceMode[]>([]);
+  let uvcModesLoading = $state(false);
+  let uvcModesError = $state('');
+  let uvcResSel = $state('');
+  let uvcFpsSel = $state('');
+  let uvcAudioDevices = $state<UVCDevice[]>([]);
+  let formUVCAudioDevice = $state('');
+
+  // Load the locally attached capture devices whenever the UVC variant is
+  // selected (re-runs on every protocol flip — cheap, one DirectShow walk).
+  $effect(() => {
+    if (formProtocol === 'uvc') {
+      loadUVCDevices();
+    }
+  });
+
+  async function loadUVCDevices() {
+    uvcDevicesLoading = true;
+    uvcDevicesError = '';
+    try {
+      uvcDevices = await listUVCDevices();
+    } catch (e) {
+      uvcDevices = [];
+      uvcDevicesError = friendlyError(e, 'cameras.uvcDevicesFailed');
+    } finally {
+      uvcDevicesLoading = false;
+    }
+    // Audio devices + modes for the device being edited.
+    loadUVCAudioDevices();
+    if (formUVCDeviceName.trim()) {
+      loadUVCModes(formUVCDeviceName.trim());
+    }
+  }
+
+  async function loadUVCAudioDevices() {
+    try {
+      uvcAudioDevices = await listUVCAudioDevices();
+    } catch {
+      uvcAudioDevices = [];
+    }
+  }
+
+  async function loadUVCModes(deviceName: string) {
+    if (!deviceName.trim()) return;
+    uvcModesLoading = true;
+    uvcModesError = '';
+    try {
+      // 8s timeout: a stuck modes query must never pin the form in "loading".
+      uvcModes = await getUVCDeviceModes(deviceName.trim(), AbortSignal.timeout(8000));
+    } catch (e) {
+      uvcModes = [];
+      uvcModesError = friendlyError(e, 'cameras.uvcModesFailed');
+    } finally {
+      uvcModesLoading = false;
+    }
+    computeResChoices();
+    // Preselect the configured combo when editing an existing capture format.
+    try {
+      const w = parseInt(formUVCWidth, 10);
+      const h = parseInt(formUVCHeight, 10);
+      if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+        const key = `${w}x${h}`;
+        if (uvcResChoices.some((r) => r.key === key)) {
+          uvcResSel = key;
+          computeFpsChoices();
+          if (formUVCFPS && uvcFpsChoices.some((f) => String(f) === formUVCFPS)) {
+            uvcFpsSel = formUVCFPS;
+          } else {
+            uvcFpsSel = '';
+          }
+        }
+      }
+    } catch {
+      // preselection is best-effort — the dropdowns still render
+    }
+  }
+
+  // Explicit state (not $derived): the option lists are recomputed at the two
+  // mutation points (modes loaded / resolution changed), which keeps the
+  // render path free of any cross-signal derivation subtleties.
+  let uvcResChoices = $state<Array<{ key: string }>>([]);
+  let uvcFpsChoices = $state<number[]>([]);
+
+  function computeResChoices() {
+    const seen = new Map<string, { w: number; h: number }>();
+    for (const m of uvcModes) {
+      const k = `${m.width}x${m.height}`;
+      if (!seen.has(k)) seen.set(k, { w: m.width, h: m.height });
+    }
+    uvcResChoices = [...seen.values()]
+      .sort((a, b) => b.w * b.h - a.w * a.h)
+      .map((r) => ({ key: `${r.w}x${r.h}` }));
+  }
+
+  function computeFpsChoices() {
+    if (!uvcResSel) {
+      uvcFpsChoices = [];
+      return;
+    }
+    const [w, h] = uvcResSel.split('x').map(Number);
+    const fps = new Set<number>();
+    for (const m of uvcModes) {
+      if (m.width === w && m.height === h) fps.add(m.fps);
+    }
+    uvcFpsChoices = [...fps].sort((a, b) => b - a);
+  }
+
+  function onUVCResChange() {
+    computeFpsChoices();
+    if (!uvcResSel) {
+      formUVCWidth = '';
+      formUVCHeight = '';
+      formUVCFPS = '';
+      uvcFpsSel = '';
+      return;
+    }
+    const [w, h] = uvcResSel.split('x').map(Number);
+    formUVCWidth = String(w);
+    formUVCHeight = String(h);
+    // Reset fps to the first (highest) mode at this resolution, or auto.
+    if (uvcFpsChoices.length > 0) {
+      uvcFpsSel = String(uvcFpsChoices[0]);
+      formUVCFPS = uvcFpsSel;
+    } else {
+      uvcFpsSel = '';
+      formUVCFPS = '';
+    }
+  }
+
+  function onUVCFpsChange() {
+    formUVCFPS = uvcFpsSel;
+  }
+
+  function buildUVCConfig(): UVCDeviceConfig | undefined {
+    if (formProtocol !== 'uvc') return undefined;
+    const cfg: UVCDeviceConfig = {
+      device: formUVCDeviceName.trim(),
+      device_path: formUVCDevicePath.trim() || undefined,
+    };
+    const w = parseInt(formUVCWidth, 10);
+    const h = parseInt(formUVCHeight, 10);
+    const fps = parseInt(formUVCFPS, 10);
+    if (Number.isFinite(w) && w > 0) cfg.width = w;
+    if (Number.isFinite(h) && h > 0) cfg.height = h;
+    if (Number.isFinite(fps) && fps > 0) cfg.fps = fps;
+    if (formUVCEncoder) cfg.encoder = formUVCEncoder;
+    if (formUVCAudioDevice.trim()) cfg.audio_device = formUVCAudioDevice.trim();
+    return cfg;
+  }
   // Push-in retention (SRT/RTMP): null=follow global, 0=live-only, N=keep N days
   let formPushRetentionDays = $state<number | null>(null);
   // Push-out relay targets
@@ -348,6 +518,19 @@ let validationErrors = $state<Record<string, string>>({});
     formSRTStreamID = '';
     formGB28181DeviceID = '';
     formGB28181ChannelID = '';
+    formUVCDevicePath = '';
+    formUVCDeviceName = '';
+    formUVCWidth = '';
+    formUVCHeight = '';
+    formUVCFPS = '';
+    formUVCEncoder = '';
+    formUVCAudioDevice = '';
+    uvcDevices = [];
+    uvcDevicesError = '';
+    uvcAudioDevices = [];
+    uvcModes = [];
+    uvcResSel = '';
+    uvcFpsSel = '';
     formPushRetentionDays = null;
     formPushTargets = [];
     formVisionTargets = [];
@@ -445,6 +628,13 @@ let validationErrors = $state<Record<string, string>>({});
     formSRTStreamID = camera.srt_stream_id || '';
     formGB28181DeviceID = camera.gb28181?.device_id || '';
     formGB28181ChannelID = camera.gb28181?.channel_id || '';
+    formUVCDevicePath = camera.uvc?.device_path || '';
+    formUVCDeviceName = camera.uvc?.device || '';
+    formUVCWidth = camera.uvc?.width ? String(camera.uvc.width) : '';
+    formUVCHeight = camera.uvc?.height ? String(camera.uvc.height) : '';
+    formUVCFPS = camera.uvc?.fps ? String(camera.uvc.fps) : '';
+    formUVCEncoder = camera.uvc?.encoder || '';
+    formUVCAudioDevice = camera.uvc?.audio_device || '';
     formPushRetentionDays = camera.push_retention_days ?? null;
     formPushTargets = (camera.push_targets ?? []).map((p) => ({ ...p }));
     formVisionTargets = camera.vision_targets ? [...camera.vision_targets] : [];
@@ -484,11 +674,15 @@ let validationErrors = $state<Record<string, string>>({});
     // rtmp/srt/whip push cameras are identified by stream key / stream-id —
     // the form shows no URL field for them, so the requirement must not apply
     // (a hidden-field validation error silently blocked save with no UI hint).
-    const urlNotRequired = formProtocol === 'gb28181' || formProtocol === 'whip' || formProtocol === 'rtmp' || formProtocol === 'srt';
+    // uvc cameras are identified by the local device — no URL either.
+    const urlNotRequired = formProtocol === 'gb28181' || formProtocol === 'whip' || formProtocol === 'rtmp' || formProtocol === 'srt' || formProtocol === 'uvc';
     if (!urlNotRequired && !formUrl.trim()) validationErrors['url'] = t('cameras.urlRequired');
     if (formProtocol === 'gb28181') {
       if (!formGB28181DeviceID.trim()) validationErrors['gb28181_device_id'] = t('cameras.gb28181DeviceIdRequired');
       if (!formGB28181ChannelID.trim()) validationErrors['gb28181_channel_id'] = t('cameras.gb28181ChannelIdRequired');
+    }
+    if (formProtocol === 'uvc' && !formUVCDevicePath.trim() && !formUVCDeviceName.trim()) {
+      validationErrors['uvc_device'] = t('cameras.uvcDeviceRequired');
     }
     if (!formProtocol) validationErrors['protocol'] = t('cameras.protocolRequired');
     // Push-out relay targets: an enabled target must have a non-empty URL whose
@@ -659,8 +853,8 @@ async function performCameraSave() {
             // onvif/xiaomi/gb28181 auto-detect codec from the live stream and
             // ignore the stored value, so don't send one (avoids writing a
             // stale label). rtsp/http/srt/rtmp send formEncoding — it drives
-            // recorder selection.
-            encoding: formProtocol === 'onvif' || formProtocol === 'xiaomi' || formProtocol === 'gb28181' ? undefined : formEncoding,
+            // recorder selection. uvc is always h264 (internal capturer).
+            encoding: formProtocol === 'uvc' ? 'h264' : formProtocol === 'onvif' || formProtocol === 'xiaomi' || formProtocol === 'gb28181' ? undefined : formEncoding,
             transcoding: {
                 enabled: formTranscodingEnabled,
                 target_codec: formTranscodingCodec,
@@ -687,6 +881,7 @@ async function performCameraSave() {
             srt_passphrase: formProtocol === 'srt' ? (formSRTPassphrase || undefined) : undefined,
             srt_stream_id: formProtocol === 'srt' ? (formSRTStreamID || undefined) : undefined,
             gb28181: formProtocol === 'gb28181' ? { device_id: formGB28181DeviceID, channel_id: formGB28181ChannelID } : undefined,
+            uvc: buildUVCConfig(),
             push_targets: formPushTargets.length > 0 ? formPushTargets : [],
             vision_targets: formVisionTargets,
             push_retention_days: (formProtocol === 'srt' || formProtocol === 'rtmp' || formProtocol === 'whip') ? formPushRetentionDays : undefined,
@@ -733,8 +928,8 @@ async function performCameraSave() {
             // onvif/xiaomi/gb28181 auto-detect codec from the live stream and
             // ignore the stored value, so don't send one (avoids writing a
             // stale label). rtsp/http/srt/rtmp send formEncoding — it drives
-            // recorder selection.
-            encoding: formProtocol === 'onvif' || formProtocol === 'xiaomi' || formProtocol === 'gb28181' ? undefined : formEncoding,
+            // recorder selection. uvc is always h264 (internal capturer).
+            encoding: formProtocol === 'uvc' ? 'h264' : formProtocol === 'onvif' || formProtocol === 'xiaomi' || formProtocol === 'gb28181' ? undefined : formEncoding,
             transcoding: {
                 enabled: formTranscodingEnabled,
                 target_codec: formTranscodingCodec,
@@ -761,6 +956,7 @@ async function performCameraSave() {
             srt_passphrase: formProtocol === 'srt' ? (formSRTPassphrase || undefined) : undefined,
             srt_stream_id: formProtocol === 'srt' ? (formSRTStreamID || undefined) : undefined,
             gb28181: formProtocol === 'gb28181' ? { device_id: formGB28181DeviceID, channel_id: formGB28181ChannelID } : undefined,
+            uvc: buildUVCConfig(),
             push_targets: formPushTargets.length > 0 ? formPushTargets : undefined,
             vision_targets: formVisionTargets,
             push_retention_days: (formProtocol === 'srt' || formProtocol === 'rtmp' || formProtocol === 'whip') ? formPushRetentionDays : undefined,
@@ -883,6 +1079,11 @@ async function performCameraSave() {
       {#if formProtocol === 'onvif' || formProtocol === 'xiaomi' || formProtocol === 'gb28181'}
         <select id="cam-encoding" class="input" disabled>
           <option value="">{t('cameras.autoDetect')}</option>
+        </select>
+      {:else if formProtocol === 'uvc'}
+        <!-- UVC: the internal capturer always delivers H.264 (transcode or copy). -->
+        <select id="cam-encoding" class="input" disabled>
+          <option value="h264">H.264</option>
         </select>
       {:else}
         <select id="cam-encoding" class="input" bind:value={formEncoding}>
@@ -1190,9 +1391,122 @@ async function performCameraSave() {
     </details>
     {/if}
 
-    <!-- URL (hidden for push/ingest protocols — publisher connects to us; and
-         for gb28181 — the camera is identified by SIP DeviceID/ChannelID) -->
-    {#if formProtocol !== 'srt' && formProtocol !== 'rtmp' && formProtocol !== 'whip' && formProtocol !== 'gb28181'}
+    <!-- UVC device picker (protocol "uvc"): local USB capture device — the
+         device path is the identity, no URL involved. -->
+    {#if formProtocol === 'uvc'}
+    <div class="md:col-span-2">
+      <div class="flex items-center justify-between">
+        <label for="cam-uvc-device" class="input-label">{t('cameras.uvcDevice')}</label>
+        <button type="button" class="btn btn-ghost px-2 py-0.5 text-xs"
+          onclick={loadUVCDevices} disabled={uvcDevicesLoading}>
+          {#if uvcDevicesLoading}<span class="spinner mr-1"></span>{/if}
+          {t('cameras.uvcRefresh')}
+        </button>
+      </div>
+      {#if uvcDevices.length > 0}
+        <select id="cam-uvc-device" class="input {validationErrors['uvc_device'] ? 'border-red-500' : ''}"
+          bind:value={formUVCDevicePath}
+          onchange={() => {
+            // Keep the friendly name in sync — the backend matches by device
+            // path first (stable identity) and falls back to the name. The
+            // mode presets reload for the newly selected device.
+            const matched = uvcDevices.find((d) => (d.path || d.name) === formUVCDevicePath);
+            if (matched) {
+              formUVCDeviceName = matched.name;
+              uvcResSel = '';
+              uvcFpsSel = '';
+              loadUVCModes(matched.name);
+            }
+          }}
+          oninput={() => { if (validationErrors['uvc_device']) delete validationErrors['uvc_device']; }}>
+          <option value="">—</option>
+          {#each uvcDevices as dev (dev.path || dev.name)}
+            <option value={dev.path || dev.name}>{dev.name}</option>
+          {/each}
+        </select>
+      {:else}
+        <input id="cam-uvc-device" type="text" class="input {validationErrors['uvc_device'] ? 'border-red-500' : ''}"
+          bind:value={formUVCDeviceName}
+          placeholder={uvcDevicesError || t('cameras.uvcNoDevices')}
+          oninput={() => { if (validationErrors['uvc_device']) delete validationErrors['uvc_device']; }} />
+      {/if}
+      {#if uvcDevicesError}
+        <p class="th-color-danger text-xs mt-1">{uvcDevicesError}</p>
+      {/if}
+      {#if validationErrors['uvc_device']}
+        <p class="th-color-danger text-xs mt-1">{validationErrors['uvc_device']}</p>
+      {/if}
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+        {#if uvcResChoices.length > 0}
+          <!-- Preset combos from the device's own pin capabilities -->
+          <div>
+            <label for="cam-uvc-res" class="input-label text-xs">{t('cameras.uvcResolution')}</label>
+            <select id="cam-uvc-res" class="input" bind:value={uvcResSel} onchange={onUVCResChange}>
+              <option value="">{t('cameras.autoDetect')}</option>
+              {#each uvcResChoices as r (r.key)}
+                <option value={r.key}>{r.key}</option>
+              {/each}
+            </select>
+          </div>
+          <div>
+            <label for="cam-uvc-fps" class="input-label text-xs">{t('cameras.uvcFPS')}</label>
+            <select id="cam-uvc-fps" class="input" bind:value={uvcFpsSel} onchange={onUVCFpsChange} disabled={!uvcResSel}>
+              <option value="">{t('cameras.autoDetect')}</option>
+              {#each uvcFpsChoices as f (f)}
+                <option value={String(f)}>{f} fps</option>
+              {/each}
+            </select>
+          </div>
+        {:else}
+          <div>
+            <label for="cam-uvc-res-w" class="input-label text-xs">{t('cameras.uvcResolution')}</label>
+            <div class="flex gap-1">
+              <input id="cam-uvc-res-w" type="number" min="0" class="input" bind:value={formUVCWidth} placeholder="1920" />
+              <input id="cam-uvc-res-h" type="number" min="0" class="input" bind:value={formUVCHeight} placeholder="1080" />
+            </div>
+          </div>
+          <div>
+            <label for="cam-uvc-fps" class="input-label text-xs">{t('cameras.uvcFPS')}</label>
+            <input id="cam-uvc-fps" type="number" min="0" class="input" bind:value={formUVCFPS} placeholder="30" />
+          </div>
+        {/if}
+        <div>
+          <label for="cam-uvc-encoder" class="input-label text-xs">{t('cameras.uvcEncoder')}</label>
+          <select id="cam-uvc-encoder" class="input" bind:value={formUVCEncoder}>
+            <option value="">libx264</option>
+            <option value="libx264">libx264</option>
+            <option value="h264_qsv">Intel QSV (h264_qsv)</option>
+          </select>
+        </div>
+      </div>
+      <p class="text-xs mt-1 {uvcModesError ? 'th-color-danger' : 'th-text-muted'}">
+        {#if uvcModesLoading}
+          {t('common.loading')}
+        {:else if uvcModesError}
+          {uvcModesError}
+        {:else}
+          {t('cameras.uvcHint')}
+        {/if}
+      </p>
+      {#if uvcAudioDevices.length > 0}
+        <div class="mt-2">
+          <label for="cam-uvc-audio" class="input-label text-xs">{t('cameras.uvcAudioDevice')}</label>
+          <select id="cam-uvc-audio" class="input" bind:value={formUVCAudioDevice}>
+            <option value="">{t('cameras.uvcAudioNone')}</option>
+            {#each uvcAudioDevices as ad (ad.path || ad.name)}
+              <option value={ad.name}>{ad.name}</option>
+            {/each}
+          </select>
+          <p class="text-xs th-text-muted mt-1">{t('cameras.uvcAudioHint')}</p>
+        </div>
+      {/if}
+    </div>
+    {/if}
+
+    <!-- URL (hidden for push/ingest protocols — publisher connects to us;
+         for gb28181 — the camera is identified by SIP DeviceID/ChannelID; and
+         for uvc — the camera is identified by the local device) -->
+    {#if formProtocol !== 'srt' && formProtocol !== 'rtmp' && formProtocol !== 'whip' && formProtocol !== 'gb28181' && formProtocol !== 'uvc'}
     <div class="md:col-span-2">
       <label for="cam-url" class="input-label">
         {t('cameras.url')}

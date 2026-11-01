@@ -158,6 +158,8 @@ func (h *Handler) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 		SubnetHints []string `json:"subnet_hints"`
 		// GB28181 SIP device/channel binding (protocol "gb28181")
 		GB28181 *gb28181ChannelPayload `json:"gb28181"`
+		// UVC device binding (protocol "uvc"): local USB capture device.
+		UVC *config.UVCConfig `json:"uvc"`
 		// AllowDuplicate opts in to adding a pull camera (onvif/rtsp/http)
 		// whose host IP already belongs to a registered GB28181 device.
 		// Default false: one camera per physical device.
@@ -205,13 +207,16 @@ func (h *Handler) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validProtocols[body.Protocol] {
-		WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid protocol %q, must be one of: rtsp, http, onvif, srt, rtmp, whip, xiaomi, timelapse, gb28181", body.Protocol))
+		WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid protocol %q, must be one of: rtsp, http, onvif, srt, rtmp, whip, xiaomi, timelapse, gb28181, uvc", body.Protocol))
 		return
 	}
 	// Push/ingest cameras (srt/rtmp/whip): no URL — the publisher connects to us.
 	isPush := body.Protocol == "srt" || body.Protocol == "rtmp" || body.Protocol == "whip"
 	// GB28181 cameras: no URL — identified by SIP DeviceID/ChannelID.
 	isGB28181 := body.Protocol == "gb28181"
+	// UVC cameras: no URL — identified by the local DirectShow device
+	// (friendly name and/or stable device path).
+	isUVC := body.Protocol == string(model.ProtoUVC)
 	// Cross-protocol dedup: a pull camera (onvif/rtsp/http) whose host IP
 	// matches a registered GB28181 device is the same physical camera — the
 	// GB28181 auto-enroll skips it symmetrically. Refuse unless the caller
@@ -281,12 +286,20 @@ func (h *Handler) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-	} else if !isPush && !isGB28181 && body.URL == "" {
+	} else if !isPush && !isGB28181 && !isUVC && body.URL == "" {
 		WriteError(w, http.StatusBadRequest, "url is required")
 		return
 	}
-	// Validate URL format for cameras that have one (not ONVIF, not push, not gb28181)
-	if body.Protocol != "onvif" && !isPush && !isGB28181 && body.URL != "" && !validateURL(body.URL) {
+	// UVC cameras: no URL — the capture device is the identity.
+	if isUVC {
+		if body.UVC == nil || (strings.TrimSpace(body.UVC.Device) == "" && strings.TrimSpace(body.UVC.DevicePath) == "") {
+			WriteError(w, http.StatusBadRequest, "uvc.device or uvc.device_path is required for uvc cameras")
+			return
+		}
+		body.URL = "" // Don't store in url field for UVC
+	}
+	// Validate URL format for cameras that have one (not ONVIF, not push, not gb28181, not uvc)
+	if body.Protocol != "onvif" && !isPush && !isGB28181 && !isUVC && body.URL != "" && !validateURL(body.URL) {
 		WriteError(w, http.StatusBadRequest, "invalid URL format")
 		return
 	}
@@ -314,6 +327,9 @@ func (h *Handler) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 			enc = "h264"
 		case "gb28181":
 			// Hint only — the recorder detects the real codec from PS stream NALUs.
+			enc = "h264"
+		case string(model.ProtoUVC):
+			// The internal capturer always delivers H.264 (transcode or copy).
 			enc = "h264"
 		case "xiaomi":
 			// Hint only — the Xiaomi recorder probes H264/H265 from the MISS
@@ -405,6 +421,9 @@ func (h *Handler) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.GB28181 != nil {
 		cam.GB28181 = body.GB28181.toConfig()
+	}
+	if body.UVC != nil {
+		cam.UVC = body.UVC
 	}
 
 	// Reject a dirty stable_id at the API boundary so it can't be frozen as the

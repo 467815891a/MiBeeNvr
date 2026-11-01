@@ -91,6 +91,8 @@ export interface Camera {
     channel_id: string;
     manufacturer?: string;
   };
+  // UVC local USB device binding (protocol "uvc")
+  uvc?: UVCDeviceConfig;
 }
 
 /** Tuning knobs for recording_mode: 'adaptive' (#435). */
@@ -259,6 +261,37 @@ export interface CreateCameraRequest {
     channel_id: string;
     manufacturer?: string;
   };
+  // UVC local USB device binding (protocol "uvc")
+  uvc?: UVCDeviceConfig;
+}
+
+/** UVC local USB camera binding (protocol "uvc"). The device is identified by
+ *  its stable DirectShow device path (preferred) and/or friendly name; the
+ *  NVR captures it with an internal FFmpeg process and transcodes to H.264. */
+export interface UVCDeviceConfig {
+  device: string;
+  device_path?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  /** "" | "libx264" (default) | "h264_qsv" */
+  encoder?: string;
+  /** DirectShow friendly name of the microphone to record (empty = no audio). */
+  audio_device?: string;
+}
+
+/** One locally attached capture device from GET /api/uvc/devices. */
+export interface UVCDevice {
+  name: string;
+  path: string;
+}
+
+/** One capture mode advertised by a device (GET /api/uvc/device-modes). */
+export interface UVCDeviceMode {
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
 }
 
 export interface UpdateCameraRequest {
@@ -324,6 +357,8 @@ export interface UpdateCameraRequest {
     channel_id: string;
     manufacturer?: string;
   };
+  // UVC local USB device binding (protocol "uvc")
+  uvc?: UVCDeviceConfig;
 }
 
 export interface DiscoveredDevice {
@@ -455,6 +490,18 @@ export const DEFAULT_PROTOCOLS: ProtocolInfo[] = [
     // through /api/cameras/{id}/ptz/* which the backend routes to the
     // GB/T 28181 DeviceControl transport for gb28181 cameras.
     capabilities: { hls: true, ptz: true, snapshot: false, discovery: false, auth: false },
+  },
+  {
+    id: 'uvc',
+    label: 'USB (UVC)',
+    encodings: ['h264'],
+    builtIn: true,
+    // Local USB (UVC) cameras: captured directly by the NVR through FFmpeg's
+    // DirectShow input — no URL or credentials. PTZ rides the standard camera
+    // PTZ endpoints which the backend routes to the device's camera controls
+    // (DirectShow IAMCameraControl). discovery=true: the add form lists
+    // locally attached devices via GET /api/uvc/devices.
+    capabilities: { hls: true, ptz: true, snapshot: false, discovery: true, auth: false },
   },
 ];
 
@@ -839,6 +886,31 @@ export async function ptzStop(cameraId: string, signal?: AbortSignal): Promise<{
 }
 
 // --- ONVIF Discovery ---
+
+/** Lists locally attached USB (UVC) capture devices for the add-camera form
+ *  (GET /api/uvc/devices). Windows only — other platforms get 501. */
+export async function listUVCDevices(signal?: AbortSignal): Promise<UVCDevice[]> {
+  const response = await apiRequest<{ devices: UVCDevice[] }>('/uvc/devices', { signal });
+  return response.devices || [];
+}
+
+/** Lists the capture modes (resolution/framerate combos) a device supports
+ *  (GET /api/uvc/device-modes?device=<friendly name>) — the add-form offers
+ *  these as presets instead of free-text width/height/fps. */
+export async function getUVCDeviceModes(device: string, signal?: AbortSignal): Promise<UVCDeviceMode[]> {
+  const response = await apiRequest<{ modes: UVCDeviceMode[] }>(
+    `/uvc/device-modes?device=${encodeURIComponent(device)}`,
+    { signal },
+  );
+  return response.modes || [];
+}
+
+/** Lists locally attached audio capture (microphone) devices for the UVC
+ *  audio picker (GET /api/uvc/audio-devices). Windows only. */
+export async function listUVCAudioDevices(signal?: AbortSignal): Promise<UVCDevice[]> {
+  const response = await apiRequest<{ devices: UVCDevice[] }>('/uvc/audio-devices', { signal });
+  return response.devices || [];
+}
 
 export async function discoverONVIFDevices(timeout: number = 5, signal?: AbortSignal): Promise<DiscoveryResult> {
   const result = await apiRequest<DiscoveryResult>('/onvif/discover', {
