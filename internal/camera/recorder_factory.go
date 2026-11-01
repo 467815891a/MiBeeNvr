@@ -227,6 +227,10 @@ func (cm *CameraManager) startRecorderLocked(ctx context.Context, cam config.Cam
 	if cm.metrics != nil {
 		cm.metrics.ActiveCameras.Inc()
 	}
+	// Put the camera back where the operator left it (the NVR is the only
+	// client that knows — see ptz_restore.go). Fire-and-forget: it runs in
+	// its own goroutine and never delays the start.
+	cm.restorePTZPosition(cam)
 	// Notify health manager of new camera with per-camera overrides
 	var overrides *config.ResolvedHealthOverrides
 	if cm.cfg.Health.Enabled {

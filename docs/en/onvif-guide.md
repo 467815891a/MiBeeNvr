@@ -205,6 +205,17 @@ curl -X GET http://localhost:9090/api/cameras/{id}/ptz/status \
   -H "Authorization: Bearer your-token"
 ```
 
+### PTZ position memory (the camera returns to where you left it)
+
+The NVR remembers the **last position each camera was moved to** (pan, tilt, zoom) and puts the camera back there whenever that camera starts again — an NVR boot, a manual camera restart, or a health-triggered auto-remediation reconnect.
+
+Why it is needed: many cameras cannot remember their own position. Most ONVIF PTZ cameras park at their home position once the last PTZ client disconnects, and USB (UVC) cameras reset their camera controls to the factory defaults when the capture device is re-opened. The NVR is the only client that knows where the operator left the camera, so it restores it.
+
+- The position lives in the database (`camera_ptz_state` table), keyed by camera ID — it survives NVR restarts
+- It is refreshed after every move/stop, including the moves a GB28181 cascade forwards
+- It applies to **ONVIF** and **UVC** cameras only: GB28181 channels are driven by the upper platform, and Xiaomi cameras only have a relative step motor — neither has an absolute position to restore
+- A failed restore (camera offline, no absolute move support, device busy) only logs a warning; recording is never affected
+
 ### Preset Management
 
 #### List Presets

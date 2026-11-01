@@ -291,8 +291,13 @@ func (d *DB) ReadPoolStats() (sql.DBStats, bool) {
 // rows). Pure addition with idempotent ensure; the baseline CREATE covers
 // fresh installs.
 //
+// v45: added camera_ptz_state — the NVR's own memory of each camera's last
+// PTZ position, so a restart can put the camera back where the operator
+// left it (UVC device units / ONVIF normalized values, tagged by the kind
+// column). Pure addition; the baseline CREATE covers fresh installs.
+//
 // The schema_meta table tracks the schema version for future migrations.
-const currentSchemaVersion = "44"
+const currentSchemaVersion = "45"
 
 func (d *DB) Init(ctx context.Context) error {
 	// ── Tables (full baseline — new installs get the final schema in one step) ──
@@ -499,6 +504,18 @@ func (d *DB) Init(ctx context.Context) error {
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		PRIMARY KEY (camera_id, token)
 	);`
+	// Last known PTZ position per camera (v45). The NVR stores it so a
+	// camera that forgets its own position (UVC controls reset on device
+	// re-open, ONVIF PTZ parks at home when the client disconnects) can be
+	// put back where the operator left it.
+	ptzStateSQL := `CREATE TABLE IF NOT EXISTS camera_ptz_state (
+		camera_id TEXT PRIMARY KEY,
+		kind TEXT NOT NULL DEFAULT '',
+		pan REAL NOT NULL DEFAULT 0,
+		tilt REAL NOT NULL DEFAULT 0,
+		zoom REAL NOT NULL DEFAULT 0,
+		updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);`
 	cascadeChSQL := `CREATE TABLE IF NOT EXISTS cascade_channels (
 		camera_id TEXT PRIMARY KEY,
 		gb_channel_id TEXT NOT NULL UNIQUE,
@@ -537,7 +554,7 @@ func (d *DB) Init(ctx context.Context) error {
         evicted_at TEXT DEFAULT ''
     );`
 
-	for _, sql := range []string{camSQL, recSQL, metaSQL, featSQL, healthSQL, transcodeSQL, aiEventsSQL, timelapseMergesSQL, archiveCleanupTasksSQL, gbDevSQL, gbChSQL, gbFpSQL, cascadeChSQL, ptzPresetsSQL, camGroupsSQL, offloadOutboxSQL, mergeLineageSQL} {
+	for _, sql := range []string{camSQL, recSQL, metaSQL, featSQL, healthSQL, transcodeSQL, aiEventsSQL, timelapseMergesSQL, archiveCleanupTasksSQL, gbDevSQL, gbChSQL, gbFpSQL, cascadeChSQL, ptzPresetsSQL, ptzStateSQL, camGroupsSQL, offloadOutboxSQL, mergeLineageSQL} {
 		if _, err := d.db.ExecContext(ctx, sql); err != nil {
 			return fmt.Errorf("create table: %w", err)
 		}

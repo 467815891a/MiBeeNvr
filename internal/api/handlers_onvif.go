@@ -412,6 +412,8 @@ func (h *Handler) handlePTZMove(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusInternalServerError, "PTZ command failed")
 		return
 	}
+	// Remember where the camera now stands so a restart can put it back.
+	h.saveONVIFPTZState(r.Context(), cameraID, ptz)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -452,6 +454,8 @@ func (h *Handler) handlePTZStop(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusInternalServerError, "PTZ stop failed")
 		return
 	}
+	// A continuous move ends here — store the position the camera stopped at.
+	h.saveONVIFPTZState(r.Context(), cameraID, ptz)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 

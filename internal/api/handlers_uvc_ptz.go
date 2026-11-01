@@ -183,6 +183,8 @@ func (h *Handler) handleUVCPTZMove(w http.ResponseWriter, r *http.Request, camer
 			h.uvcPTZError(w, cameraID, "absolute move", err)
 			return
 		}
+		// Remember where the camera now stands so a restart can put it back.
+		h.saveUVCPTZState(r.Context(), cameraID, ctrl)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	case "relative":
 		h.stopUVCPTZTicker(cameraID)
@@ -199,6 +201,7 @@ func (h *Handler) handleUVCPTZMove(w http.ResponseWriter, r *http.Request, camer
 				return
 			}
 		}
+		h.saveUVCPTZState(r.Context(), cameraID, ctrl)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		WriteError(w, http.StatusBadRequest, "mode must be continuous, absolute, or relative")
@@ -207,9 +210,23 @@ func (h *Handler) handleUVCPTZMove(w http.ResponseWriter, r *http.Request, camer
 
 // handleUVCPTZStop ends the emulated continuous move (relative steps complete
 // on their own, so cancelling the ticker is the whole stop).
-func (h *Handler) handleUVCPTZStop(w http.ResponseWriter, _ *http.Request, cameraID string) {
+func (h *Handler) handleUVCPTZStop(w http.ResponseWriter, r *http.Request, cameraID string) {
+	ctrl := h.uvcPTZControllerOrNil(cameraID)
 	h.stopUVCPTZTicker(cameraID)
+	// The ticker was moving the camera — store where it ended up.
+	if ctrl != nil {
+		h.saveUVCPTZState(r.Context(), cameraID, ctrl)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+// uvcPTZControllerOrNil returns the cached controller for a camera without
+// creating one (the stop path must not spawn a helper for a camera that
+// never used PTZ).
+func (h *Handler) uvcPTZControllerOrNil(cameraID string) *uvc.UVCController {
+	h.uvcPTZMu.Lock()
+	defer h.uvcPTZMu.Unlock()
+	return h.uvcPTZClients[cameraID]
 }
 
 // handleUVCPTZStatus reports the current control values (raw device units)

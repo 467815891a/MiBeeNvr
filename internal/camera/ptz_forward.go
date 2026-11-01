@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/onvif"
+	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/storage"
 	"github.com/Mi-Bee-Studio/MiBeeNvr/internal/uvc"
 )
 
@@ -21,7 +22,7 @@ type motorController interface {
 const uvcCascadeBurstSteps = 3
 
 // ForwardPTZ routes a decoded GB/T 28181 PTZ command to a local camera's
-// native PTZ control — the bridge used by the GB28181 cascade when the upper
+// native PTZ control 鈥?the bridge used by the GB28181 cascade when the upper
 // platform sends a DeviceControl for one of our aggregated channels:
 //
 //   - gb28181 cameras: forwarded through the local platform's PTZ controller
@@ -59,7 +60,12 @@ func ForwardPTZ(ctx context.Context, cm *CameraManager, gbSend func(channelID, d
 			return err
 		}
 		if direction == "stop" {
-			return ptz.Stop(ctx, true, true)
+			if err := ptz.Stop(ctx, true, true); err != nil {
+				return err
+			}
+			// The move ended here 鈥?remember where the camera stopped.
+			cm.saveForwardedONVIFPTZState(ctx, cameraID, ptz)
+			return nil
 		}
 		v := ptzVectorFor(direction, speed)
 		if v == (onvif.PTZVector{}) {
@@ -93,8 +99,7 @@ func ForwardPTZ(ctx context.Context, cm *CameraManager, gbSend func(channelID, d
 		if cfg.UVC == nil {
 			return fmt.Errorf("camera %q has no UVC device binding", cameraID)
 		}
-		// Control calls run in the sacrificial uvc-ptz helper subprocess —
-		// same rationale as the API PTZ path (vendor proxies can crash).
+		// Control calls run in the sacrificial uvc-ptz helper subprocess 鈥?		// same rationale as the API PTZ path (vendor proxies can crash).
 		// Cascade commands are low-frequency, so a short-lived controller
 		// (one helper spawn per command) is the simple correct shape.
 		dev := uvc.Device{Name: cfg.UVC.Device, Path: cfg.UVC.DevicePath}
@@ -102,12 +107,20 @@ func ForwardPTZ(ctx context.Context, cm *CameraManager, gbSend func(channelID, d
 		defer ctrl.Stop()
 		switch direction {
 		case "stop":
-			// UVC relative steps complete on their own — nothing to halt.
+			// UVC relative steps complete on their own 鈥?nothing to halt.
 			return nil
 		case "zoom-in":
-			return ctrl.ZoomStep(1)
+			if err := ctrl.ZoomStep(1); err != nil {
+				return err
+			}
+			cm.saveForwardedUVCPTZState(ctx, cameraID, ctrl)
+			return nil
 		case "zoom-out":
-			return ctrl.ZoomStep(-1)
+			if err := ctrl.ZoomStep(-1); err != nil {
+				return err
+			}
+			cm.saveForwardedUVCPTZState(ctx, cameraID, ctrl)
+			return nil
 		}
 		pan, tilt := 0, 0
 		switch direction {
@@ -130,11 +143,48 @@ func ForwardPTZ(ctx context.Context, cm *CameraManager, gbSend func(channelID, d
 		default:
 			return fmt.Errorf("direction %q not supported by UVC PTZ forward", direction)
 		}
-		return ctrl.MoveBy(pan, tilt)
+		if err := ctrl.MoveBy(pan, tilt); err != nil {
+			return err
+		}
+		// The cascade moved the camera 鈥?keep the position memory in sync so
+		// a restart puts it back where the cascade left it.
+		cm.saveForwardedUVCPTZState(ctx, cameraID, ctrl)
+		return nil
 
 	default:
 		return fmt.Errorf("camera %q (protocol %q) has no PTZ support", cameraID, cfg.Protocol)
 	}
+}
+
+// saveForwardedUVCPTZState stores the position a cascade command left a UVC
+// camera at, so the position memory stays in sync with the hardware.
+func (cm *CameraManager) saveForwardedUVCPTZState(ctx context.Context, cameraID string, ctrl *uvc.UVCController) {
+	if ctrl == nil {
+		return
+	}
+	pos, err := ctrl.GetPosition()
+	if err != nil {
+		logger.Debug("read the UVC PTZ position after a cascade move failed",
+			"camera_id", cameraID, "error", err)
+		return
+	}
+	cm.storePTZState(ctx, cameraID, storage.PTZKindUVCAbsolute,
+		float64(pos.Pan), float64(pos.Tilt), float64(pos.Zoom))
+}
+
+// saveForwardedONVIFPTZState stores the position a cascade command left an
+// ONVIF camera at.
+func (cm *CameraManager) saveForwardedONVIFPTZState(ctx context.Context, cameraID string, ptz onvif.PTZController) {
+	if ptz == nil {
+		return
+	}
+	pos, _, err := ptz.GetStatus(ctx)
+	if err != nil {
+		logger.Debug("read the ONVIF PTZ position after a cascade move failed",
+			"camera_id", cameraID, "error", err)
+		return
+	}
+	cm.storePTZState(ctx, cameraID, storage.PTZKindONVIFNormalized, pos.Pan, pos.Tilt, pos.Zoom)
 }
 
 // ptzVectorFor maps a GB direction + speed byte onto an ONVIF velocity vector
