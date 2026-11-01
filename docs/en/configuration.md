@@ -666,6 +666,13 @@ cameras:
 - **Description**: Dark-frame filtering (MJPEG/AVI cameras only) — when enabled, each segment is brightness-checked at close time; segments too dark to be useful (night without IR capability) are marked `merge_status='dark'`, excluded from merge, and cleaned up early. `dark_frame_threshold` is the brightness threshold (0–255)
 - **Example**: `true`, `15`
 
+### `cameras[].watermark_enabled`
+- **Type**: boolean
+- **Optional**: Yes
+- **Default**: `false`
+- **Description**: Burn-in time watermark — the current time is rendered into the top-left corner of the picture inside the capture filter chain; the glyph size scales with the short side of the frame. The font colour follows the backdrop: white over a dark scene, black over a bright one (decided per frame from the average luminance of the watermark area). The stamp is encoded into the stream itself, so the recorded segments and the live preview both carry it. Only the UVC capture pipeline can do this — an RTSP/ONVIF camera is recorded as the stream the camera already encoded, with no decode step to draw on. When no usable font file exists the watermark is skipped and recording continues (a missing font must never stop a camera). The change applies after the camera's recorder restarts
+- **Example**: `true`
+
 ### `cameras[].hls_max_fps`
 - **Type**: integer
 - **Optional**: Yes

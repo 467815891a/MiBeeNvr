@@ -302,6 +302,8 @@
   "cameras.cascadeSubStream": "Субпоток каскада",
   "cameras.cascadeSubStreamHint": "Перенаправлять субпоток низкого разрешения на верхнюю платформу (экономия полосы). Возвращается к основному, если у камеры нет субпотока.",
   "cameras.recordingEnabled": "Записывать видео на диск",
+  "cameras.watermarkEnabled": "Впечатывать время в запись",
+  "cameras.watermarkEnabledHint": "Текущее время впечатывается в левый верхний угол кадра: белый шрифт на тёмном фоне, чёрный — на светлом.",
   "cameras.recordingSchedule": "Расписание записи",
   "cameras.recordingScheduleHint": "запись по времени",
   "cameras.recordingScheduleAddRange": "Добавить интервал",

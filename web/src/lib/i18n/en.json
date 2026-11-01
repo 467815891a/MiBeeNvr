@@ -320,6 +320,8 @@
   "cameras.cascadeSubStream": "Cascade sub-stream",
   "cameras.cascadeSubStreamHint": "Forward the low-res sub-stream to the upper platform (bandwidth-friendly). Falls back to main when the camera has no sub-stream.",
   "cameras.recordingEnabled": "Record video to disk",
+  "cameras.watermarkEnabled": "Burn the time into recordings",
+  "cameras.watermarkEnabledHint": "Renders the current time in the top-left corner of the picture; the font turns white on a dark scene and black on a bright one.",
   "cameras.recordingSchedule": "Recording schedule",
   "cameras.recordingScheduleHint": "time-based recording",
   "cameras.recordingScheduleAddRange": "Add time range",

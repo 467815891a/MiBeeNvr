@@ -1096,3 +1096,67 @@ describe('CameraForm - cascade catalog boundary (#1037)', () => {
     expect(cb.checked).toBe(false);
   });
 });
+
+describe('CameraForm - burn-in time watermark', () => {
+  afterEach(() => {
+    cleanup();
+    mockApiRequest.mockReset();
+  });
+
+  const uvcCam = {
+    id: 'uvc-wm-1',
+    name: 'USB Cam',
+    protocol: 'uvc',
+    encoding: 'h264',
+    uvc: { device: 'Cam', device_path: '', width: 1920, height: 1080, fps: 30 },
+  };
+
+  function mockPresetsOnly() {
+    mockApiRequest.mockImplementation((path: string) => {
+      if (path === '/relay-presets') return Promise.resolve(mockPresets);
+      return Promise.resolve(null);
+    });
+  }
+
+  it('offers the watermark toggle for a UVC camera and sends it in the update payload', async () => {
+    mockPresetsOnly();
+    const { container } = render(CameraForm, {
+      props: defaultProps({ editingCamera: uvcCam as any }),
+    });
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#cam-watermark')).toBeTruthy();
+    });
+    const box = container.querySelector('#cam-watermark') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await fireEvent.click(box);
+
+    const saveBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('cameras.save'),
+    );
+    await fireEvent.click(saveBtn!);
+
+    await vi.waitFor(() => {
+      const put = mockApiRequest.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0] === '/cameras/uvc-wm-1',
+      );
+      expect(put, 'PUT /cameras/{id} should have been issued').toBeTruthy();
+      const body = JSON.parse((put![1] as RequestInit).body as string);
+      expect(body.watermark_enabled).toBe(true);
+    });
+  });
+
+  it('hides the watermark toggle for cameras the capture pipeline cannot burn into', async () => {
+    mockPresetsOnly();
+    const { container } = render(CameraForm, {
+      props: defaultProps({
+        editingCamera: { ...uvcCam, id: 'rtsp-wm-1', protocol: 'rtsp', uvc: undefined } as any,
+      }),
+    });
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('#cam-name')).toBeTruthy();
+    });
+    expect(container.querySelector('#cam-watermark')).toBeNull();
+  });
+});

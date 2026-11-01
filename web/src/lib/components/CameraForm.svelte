@@ -112,6 +112,9 @@
   // Recording gate — when off, the recorder stays connected for live preview
   // and relay but writes NO segments to disk (live-only / stream-forward mode).
   let formRecordingEnabled = $state(true);
+  // Burn the wall-clock time into the recorded frames (UVC captures only):
+  // top-left corner, white glyphs over a dark backdrop, black over a bright one.
+  let formWatermarkEnabled = $state(false);
   // Cascade catalog toggle. Non-GB sources default OFF: they have no on-demand
   // activation upstream, so the upper platform could only play them while this
   // camera happens to be recording. formCascadeTouched marks an explicit user
@@ -585,6 +588,7 @@ let validationErrors = $state<Record<string, string>>({});
     formAudioEnabled = camera.audio_enabled ?? false;
     formAudioInRecordings = camera.audio_in_recordings ?? false;
     formRecordingEnabled = camera.recording_enabled ?? true;
+    formWatermarkEnabled = camera.watermark_enabled ?? false;
     formCascadeEnabled = camera.cascade_enabled ?? camera.protocol === 'gb28181';
     formCascadeTouched = camera.cascade_enabled != null;
     formCascadeSubStream = camera.cascade_sub_stream ?? false;
@@ -866,6 +870,9 @@ async function performCameraSave() {
             audio_enabled: formAudioEnabled,
             audio_in_recordings: formAudioInRecordings,
             recording_enabled: formRecordingEnabled,
+            // Burn-in timestamp — only the UVC capture can render it (the
+            // other protocols record the encoded stream as it arrives).
+            watermark_enabled: formProtocol === 'uvc' ? formWatermarkEnabled : undefined,
             cascade_enabled: formCascadeEnabled,
             cascade_sub_stream: formCascadeSubStream,
             recording_mode: formRecordingMode,
@@ -941,6 +948,9 @@ async function performCameraSave() {
             audio_enabled: formAudioEnabled,
             audio_in_recordings: formAudioInRecordings,
             recording_enabled: formRecordingEnabled,
+            // Burn-in timestamp — only the UVC capture can render it (the
+            // other protocols record the encoded stream as it arrives).
+            watermark_enabled: formProtocol === 'uvc' ? formWatermarkEnabled : undefined,
             cascade_enabled: formCascadeEnabled,
             cascade_sub_stream: formCascadeSubStream,
             recording_mode: formRecordingMode,
@@ -1136,6 +1146,22 @@ async function performCameraSave() {
         {t('cameras.recordingEnabled')}
       </label>
     </div>
+    {#if formProtocol === 'uvc'}
+      <!-- Burn-in timestamp: rendered by the capture filter chain, so it is
+           part of the encoded stream (segments AND live preview). -->
+      <div class="flex items-center gap-2">
+        <input
+          id="cam-watermark"
+          type="checkbox"
+          class="checkbox"
+          bind:checked={formWatermarkEnabled}
+        />
+        <label for="cam-watermark" class="input-label cursor-pointer">
+          {t('cameras.watermarkEnabled')}
+        </label>
+      </div>
+      <p class="text-xs th-text-muted -mt-1">{t('cameras.watermarkEnabledHint')}</p>
+    {/if}
       {#if formProtocol === 'onvif'}
         <!-- Motion source (#711): NVR-side detectors or the camera's own
              Pull-Point MotionAlarm subscription (mibee_cam WiFi-CSI). -->

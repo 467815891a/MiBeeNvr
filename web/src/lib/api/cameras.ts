@@ -46,6 +46,9 @@ export interface Camera {
   audio_enabled?: boolean;
   /** Keep the real audio track in recorded segments (default off). */
   audio_in_recordings?: boolean;
+  /** Burn the wall-clock time into the recorded frames (top-left, colour
+   *  follows the backdrop). UVC captures only. */
+  watermark_enabled?: boolean;
   // Recording gate: false = live-only (no segments written to disk; the recorder
   // stays connected for live preview + relay + health). undefined = record.
   recording_enabled?: boolean | null;
@@ -219,6 +222,9 @@ export interface CreateCameraRequest {
   channel?: string;
   // Recording gate: false = live-only (no segments written). Omit = record.
   recording_enabled?: boolean | null;
+  // Burn the wall-clock time into the recorded frames (top-left, colour
+  // follows the backdrop). Omit = unchanged. UVC captures only.
+  watermark_enabled?: boolean;
   // Cascade gate: false = hidden from the GB28181 cascade catalog. Omit = exposed.
   cascade_enabled?: boolean | null;
   /** Cascade tier: forward the sub-stream instead of main (#512). */
@@ -318,6 +324,9 @@ export interface UpdateCameraRequest {
   channel?: string;
   // Recording gate: false = live-only (no segments written). Omit = unchanged.
   recording_enabled?: boolean | null;
+  // Burn the wall-clock time into the recorded frames (top-left, colour
+  // follows the backdrop). Omit = unchanged. UVC captures only.
+  watermark_enabled?: boolean;
   // Cascade gate: false = hidden from the GB28181 cascade catalog. Omit = unchanged.
   cascade_enabled?: boolean | null;
   /** Cascade tier: forward the sub-stream instead of main (#512). */
