@@ -68,6 +68,10 @@ type CameraUpdate struct {
 	// Dark frame filtering
 	DarkFrameFilterEnabled *bool
 	DarkFrameThreshold     *int
+	// WatermarkEnabled burns the wall-clock time into the recorded frames
+	// (top-left, colour follows the backdrop). nil = unchanged. Read when
+	// the recorder is built — a change restarts the recorder.
+	WatermarkEnabled *bool
 	// RecordingEnabled gates segment writes (false = live-only). nil = unchanged.
 	RecordingEnabled *bool
 	// CascadeEnabled gates GB28181 cascade exposure (false = hidden from the

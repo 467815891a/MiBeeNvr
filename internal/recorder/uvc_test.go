@@ -8,7 +8,7 @@ import (
 // TestBuildFFmpegArgsDefault asserts the default dshow→H.264 stdout pipeline:
 // MJPEG-forced input, libx264 veryfast/zerolatency, sane GOP, no audio.
 func TestBuildFFmpegArgsDefault(t *testing.T) {
-	args := buildFFmpegArgs("HD Webcam", 0, true, 1920, 1080, 30, "")
+	args := buildFFmpegArgs("HD Webcam", 0, true, 1920, 1080, 30, "", "")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"-f dshow", "-rtbufsize 256M", "-vcodec mjpeg",
@@ -34,7 +34,7 @@ func TestBuildFFmpegArgsDefault(t *testing.T) {
 // TestBuildFFmpegArgsQSV asserts the QSV encoder selection: no x264-specific
 // presets/tune, GOP derived from fps, and explicit device number when given.
 func TestBuildFFmpegArgsQSV(t *testing.T) {
-	args := buildFFmpegArgs("PTZ Cam", 1, false, 0, 0, 25, "h264_qsv")
+	args := buildFFmpegArgs("PTZ Cam", 1, false, 0, 0, 25, "h264_qsv", "")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{"-c:v h264_qsv", "-bf 0", "-g 25", "-video_device_number 1", "video=PTZ Cam"} {
 		if !strings.Contains(joined, want) {

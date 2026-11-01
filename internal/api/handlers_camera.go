@@ -82,6 +82,7 @@ func injectYAMLConfigFields(row *storage.CameraRow, cfg *config.Config) {
 		row.SubStreamURL = cam.SubStreamURL
 		row.DarkFrameFilterEnabled = cam.DarkFrameFilterEnabled
 		row.DarkFrameThreshold = cam.DarkFrameThreshold
+		row.WatermarkEnabled = cam.WatermarkEnabled
 		row.RecordingEnabled = cam.RecordingEnabled
 		row.CascadeEnabled = cam.CascadeEnabled
 		row.RecordingSchedule = cam.RecordingSchedule
@@ -391,6 +392,9 @@ func (h *Handler) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 		// Dark frame filtering
 		DarkFrameFilterEnabled *bool `json:"dark_frame_filter_enabled"`
 		DarkFrameThreshold     *int  `json:"dark_frame_threshold"`
+		// Burn the wall-clock time into the recorded frames (top-left,
+		// colour follows the backdrop). nil = unchanged. UVC captures only.
+		WatermarkEnabled *bool `json:"watermark_enabled"`
 		// Recording gate: false = live-only (no segments written). nil = unchanged.
 		RecordingEnabled *bool `json:"recording_enabled"`
 		// Cascade gate: false = hidden from the GB28181 cascade catalog and
@@ -529,6 +533,7 @@ func (h *Handler) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 		AudioInRecordings:      body.AudioInRecordings,
 		DarkFrameFilterEnabled: body.DarkFrameFilterEnabled,
 		DarkFrameThreshold:     body.DarkFrameThreshold,
+		WatermarkEnabled:       body.WatermarkEnabled,
 		RecordingEnabled:       body.RecordingEnabled,
 		CascadeEnabled:         body.CascadeEnabled,
 		CascadeSubStream:       body.CascadeSubStream,

@@ -52,6 +52,13 @@ type UVCRecorderConfig struct {
 	// RecordEnabled: nil or true = record normally; false = live-only
 	// (StreamHub fan-out without segment writes). Mirrors the other recorders.
 	RecordEnabled *bool
+	// WatermarkEnabled burns the wall-clock time into the captured frames —
+	// top-left corner, white glyphs over a dark backdrop and black glyphs
+	// over a bright one. The stamp is part of the encoded stream, so it
+	// shows up in the recorded segments and in the live preview alike.
+	// Read when the capture process is spawned, so a change needs a
+	// recorder restart.
+	WatermarkEnabled bool
 }
 
 // UVCRecorder captures a local USB (UVC) camera with an internal FFmpeg
@@ -366,7 +373,11 @@ func (r *UVCRecorder) captureOnce(ctx context.Context) error {
 
 // buildFFmpegArgs assembles the dshow→H.264 stdout pipeline. Kept pure for
 // unit testing.
-func buildFFmpegArgs(name string, deviceNumber int, forceMJPEG bool, width, height, fps int, encoder string) []string {
+//
+// watermarkFilter is an optional `-vf` filtergraph ("" = no filter). It is
+// where the burn-in timestamp lives: the filter runs inside the capture, so
+// the stamp is encoded into the stream the recorder writes to disk.
+func buildFFmpegArgs(name string, deviceNumber int, forceMJPEG bool, width, height, fps int, encoder string, watermarkFilter string) []string {
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
 	// dshow input options (all must precede -i).
 	args = append(args, "-f", "dshow", "-rtbufsize", "256M")
@@ -383,6 +394,11 @@ func buildFFmpegArgs(name string, deviceNumber int, forceMJPEG bool, width, heig
 		args = append(args, "-video_device_number", strconv.Itoa(deviceNumber))
 	}
 	args = append(args, "-i", fmt.Sprintf("video=%s", name))
+
+	// Output filters (after the input, before the encoder).
+	if watermarkFilter != "" {
+		args = append(args, "-vf", watermarkFilter)
+	}
 
 	// Output: H.264 Annex-B on stdout, no audio (UVC video-only pipeline).
 	if encoder == "" {
@@ -413,11 +429,34 @@ func buildFFmpegArgs(name string, deviceNumber int, forceMJPEG bool, width, heig
 	return args
 }
 
+// watermarkFilter builds the FFmpeg filter chain that burns the wall-clock
+// time into the capture, or "" when the watermark is off.
+//
+// A camera without any usable font file records WITHOUT the stamp instead of
+// failing to start: drawtext aborts FFmpeg when it cannot open its fontfile,
+// and a camera that stopped recording to show a clock would be a far worse
+// outcome than a missing timestamp.
+func (r *UVCRecorder) watermarkFilter() string {
+	if !r.cfg.WatermarkEnabled {
+		return ""
+	}
+	font := ResolveWatermarkFont()
+	if font == "" {
+		uvcLogger.Warn("uvc watermark requested but no font file is available; recording without the timestamp",
+			"camera_id", r.cfg.CameraID)
+		return ""
+	}
+	return watermarkFilterGraph(WatermarkSpec{
+		FontFile:     font,
+		EpochSeconds: time.Now().Unix(),
+	})
+}
+
 // runFFmpeg spawns one FFmpeg process and pumps stdout through the Annex-B
 // parser into the inner ingest recorder. Returns when the process exits or
 // ctx is cancelled. err is nil for clean EOF, non-nil otherwise.
 func (r *UVCRecorder) runFFmpeg(ctx context.Context, ffmpegPath, name string, deviceNumber int, forceMJPEG bool, format captureFormat) error {
-	args := buildFFmpegArgs(name, deviceNumber, forceMJPEG, format.Width, format.Height, format.FPS, r.cfg.Encoder)
+	args := buildFFmpegArgs(name, deviceNumber, forceMJPEG, format.Width, format.Height, format.FPS, r.cfg.Encoder, r.watermarkFilter())
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	cmd.Stderr = nil // captured below via a pipe
 

@@ -106,6 +106,17 @@ type CameraConfig struct {
 	DarkFrameFilterEnabled bool `yaml:"dark_frame_filter_enabled,omitempty" json:"dark_frame_filter_enabled,omitempty"`
 	DarkFrameThreshold     int  `yaml:"dark_frame_threshold,omitempty" json:"dark_frame_threshold,omitempty"` // 0-255, default 15
 
+	// WatermarkEnabled burns the wall-clock time into the recorded frames
+	// (top-left corner). The glyph colour follows the backdrop: white on a
+	// dark scene, black on a bright one, decided per frame by the capture
+	// filter chain. The stamp is encoded into the stream, so it appears in
+	// the recorded segments and in the live preview alike.
+	// Only the UVC capture pipeline can do this — an RTSP/ONVIF camera is
+	// recorded as the encoded stream it delivers, with no decode step to
+	// draw on. Read when the recorder is built, so a change needs a
+	// recorder restart.
+	WatermarkEnabled bool `yaml:"watermark_enabled,omitempty" json:"watermark_enabled,omitempty"`
+
 	// RecordingEnabled gates whether this camera writes segments to disk.
 	// nil or true (default) = record normally. false = "live-only" mode: the
 	// recorder stays connected and feeds the StreamHub (live preview, relay,

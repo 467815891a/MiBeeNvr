@@ -392,6 +392,9 @@ func (cm *CameraManager) buildUVCRecorder(cam config.CameraConfig, segDur time.D
 		Metrics:       cm.metrics,
 		EventBus:      cm.eventBus,
 		RecordEnabled: cam.RecordingEnabled,
+		// Burn the wall-clock time into the captured frames (UVC only — the
+		// other protocols record the encoded stream as it arrives).
+		WatermarkEnabled: cam.WatermarkEnabled,
 	})
 }
 

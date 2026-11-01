@@ -73,6 +73,9 @@ type CameraRow struct {
 	// Dark frame filtering (injected from YAML at API response time)
 	DarkFrameFilterEnabled bool `json:"dark_frame_filter_enabled"`
 	DarkFrameThreshold     int  `json:"dark_frame_threshold"`
+	// WatermarkEnabled burns the wall-clock time into the recorded frames
+	// (injected from YAML at API response time).
+	WatermarkEnabled bool `json:"watermark_enabled"`
 	// Recording gate (injected from YAML at API response time). nil = record;
 	// pointer to false = live-only (no segments written to disk).
 	RecordingEnabled *bool `json:"recording_enabled,omitempty"`

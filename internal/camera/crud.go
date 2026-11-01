@@ -673,6 +673,14 @@ func (cm *CameraManager) UpdateCamera(ctx context.Context, cameraID string, upda
 	if updates.DarkFrameThreshold != nil {
 		cam.DarkFrameThreshold = *updates.DarkFrameThreshold
 	}
+	if updates.WatermarkEnabled != nil {
+		// The burn-in filter is part of the capture command line, so the
+		// recorder has to be rebuilt for the change to take effect.
+		if *updates.WatermarkEnabled != cam.WatermarkEnabled {
+			needsRestart = true
+		}
+		cam.WatermarkEnabled = *updates.WatermarkEnabled
+	}
 	if updates.RecordingEnabled != nil {
 		// Toggling live-only mode requires a recorder restart to take effect
 		// (the writeFrames loop reads RecordEnabled once at Start).

@@ -123,6 +123,9 @@ func (h *Handler) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 		AudioEnabled    *bool                         `json:"audio_enabled"`
 		// Keep the camera's real audio track in recorded segments (default off).
 		AudioInRecordings *bool `json:"audio_in_recordings"`
+		// Burn the wall-clock time into the recorded frames (top-left, colour
+		// follows the backdrop). nil = off. UVC captures only.
+		WatermarkEnabled *bool `json:"watermark_enabled"`
 		// Recording gate: false = live-only (no segments written). nil = record.
 		RecordingEnabled *bool `json:"recording_enabled"`
 		// Recording schedule: time windows outside which nothing is recorded.
@@ -401,6 +404,7 @@ func (h *Handler) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 		Channel:           body.Channel,
 		AudioEnabled:      body.AudioEnabled != nil && *body.AudioEnabled,
 		AudioInRecordings: body.AudioInRecordings != nil && *body.AudioInRecordings,
+		WatermarkEnabled:  body.WatermarkEnabled != nil && *body.WatermarkEnabled,
 		RecordingEnabled:  body.RecordingEnabled,
 		RecordingSchedule: body.RecordingSchedule,
 		CascadeEnabled:    body.CascadeEnabled,
