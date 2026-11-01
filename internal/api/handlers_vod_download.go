@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +36,15 @@ const (
 // stream copy can only begin on a keyframe, so the output starts at most one
 // GOP early and ends exactly at the requested end. The codec is copied (no
 // re-encode), so the download completes at IO speed.
+//
+// HEAD is answered by this same handler. A browser resolves a download link
+// with a HEAD probe FIRST — it needs the Content-Disposition to learn the file
+// name before it starts the transfer. When that probe answers 405 the browser
+// gives up on the download and renders the MP4 inside the tab instead: a
+// multi-hundred-megabyte video the renderer has to hold in RAM, which ends in
+// the tab's "Out of Memory" error page (and on the server as a connection that
+// dies instantly — ffmpeg's "Broken pipe"). The HEAD therefore returns the
+// very same headers as the GET, with no body.
 func (h *Handler) handleDownloadRange(w http.ResponseWriter, r *http.Request) {
 	cameraID := chi.URLParam(r, "cameraID")
 	q := r.URL.Query()
@@ -109,14 +117,87 @@ func (h *Handler) handleDownloadRange(w http.ResponseWriter, r *http.Request) {
 		filename += ".mp4"
 	}
 
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", url.PathEscape(filename)))
+	// The Content-Type is deliberately NOT video/mp4. This endpoint only ever
+	// delivers a file, and a browser that decides to render the response
+	// instead of saving it would have to buffer the whole clip in RAM — a
+	// 700 MB range is exactly what made the tab die with "Out of Memory".
+	// octet-stream plus the attachment disposition leaves the browser no
+	// choice but to save it; the file on disk is still a plain MP4.
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Cache-Control", "no-cache")
+
+	// HEAD: same headers as the GET, no body. The browser only needs them to
+	// resolve the download target; running ffmpeg for a probe would be pure
+	// waste (the clip can be hundreds of megabytes).
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	if err := h.streamRangeClips(w, r, cameraID, clips, ffmpegPath); err != nil {
 		logger.Error("download range failed",
 			"camera_id", cameraID, "error", err)
 	}
+}
+
+// contentDispositionAttachment builds the Content-Disposition header of a
+// download.
+//
+// The name is carried twice on purpose. `filename*` (RFC 5987) holds the real
+// UTF-8 name, while `filename` holds an ASCII-safe fallback: clients that do
+// not implement RFC 5987 drop the extended form entirely and would otherwise
+// end up with no name at all. RFC 6266 says the recipient prefers `filename*`
+// when both are present, so the fallback never overrides the real name.
+func contentDispositionAttachment(filename string) string {
+	ascii := strings.Map(func(rr rune) rune {
+		if rr < 0x20 || rr > 0x7e {
+			return '_'
+		}
+		switch rr {
+		case '"', '\\', ';':
+			return '_'
+		}
+		return rr
+	}, filename)
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s",
+		ascii, rfc5987Escape(filename))
+}
+
+// rfc5987Escape percent-encodes a filename for the `filename*` ext-value of
+// a Content-Disposition header.
+//
+// Only attr-char may appear literally; everything else — non-ASCII bytes and
+// characters like '=' that url.PathEscape leaves alone — is percent-encoded,
+// so the header parses the same way in every browser. The input is the raw
+// UTF-8 of the name, so each byte is encoded on its own.
+func rfc5987Escape(s string) string {
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if isAttrChar(c) {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(upperhex[c>>4])
+		b.WriteByte(upperhex[c&0x0f])
+	}
+	return b.String()
+}
+
+// isAttrChar reports whether c may appear literally in an RFC 5987 ext-value.
+func isAttrChar(c byte) bool {
+	if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' {
+		return true
+	}
+	switch c {
+	case '!', '#', '$', '&', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
 }
 
 // rangeClip is one recording's contribution to the requested window.

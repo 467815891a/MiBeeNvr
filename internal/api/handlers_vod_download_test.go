@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -253,6 +254,71 @@ func TestDownloadRange_RejectsInvertedWindow(t *testing.T) {
 		base.Format(time.RFC3339))
 	rr := doRequest(t, h.Routes(), "GET", "/api/cameras/cam-1/download-range?"+q, nil, "", "")
 	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// TestDownloadRange_HeadResolvesDownloadTarget is the regression guard for the
+// "Out of Memory" tab error: a browser resolves a download link with a HEAD
+// probe to learn the file name. The route used to answer 405 there, and the
+// browser then abandoned the download and rendered the MP4 inside the tab —
+// a several-hundred-megabyte video the renderer has to buffer in RAM.
+func TestDownloadRange_HeadResolvesDownloadTarget(t *testing.T) {
+	t.Parallel()
+	db, store := setupTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	h := TestHandler(db, store)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seg.mp4")
+	makeTestMP4(t, path, 10)
+
+	recStart := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	seedRecording(t, db, &model.Recording{
+		ID: "rec-1", CameraID: "cam-1", FilePath: path, Format: model.FormatH264,
+		StartedAt: recStart, EndedAt: recStart.Add(10 * time.Second),
+		Duration: 10, MergeStatus: model.MergeStatusPending,
+	})
+
+	q := fmt.Sprintf("start=%s&end=%s&name=%s",
+		recStart.Add(2*time.Second).Format(time.RFC3339),
+		recStart.Add(6*time.Second).Format(time.RFC3339),
+		url.QueryEscape("罗技_test"))
+	rr := doRequest(t, h.Routes(), "HEAD", "/api/cameras/cam-1/download-range?"+q, nil, "", "")
+
+	require.Equal(t, http.StatusOK, rr.Code,
+		"the browser's HEAD probe must not be rejected: %s", rr.Body.String())
+	require.Empty(t, rr.Body.Bytes(), "HEAD must not carry a body")
+	// octet-stream keeps the browser from rendering the clip in the tab.
+	require.Equal(t, "application/octet-stream", rr.Header().Get("Content-Type"))
+
+	disp := rr.Header().Get("Content-Disposition")
+	require.Contains(t, disp, "attachment", "the probe must learn that this is a download")
+	require.Contains(t, disp, "filename=", "the probe must learn the file name")
+	require.Contains(t, disp, "filename*=UTF-8''", "the UTF-8 name must survive")
+	require.Contains(t, disp, "%E7%BD%97%E6%8A%80", "the Chinese name must be percent-encoded")
+}
+
+// TestContentDispositionAttachment checks the two forms of the header: the
+// RFC 5987 extended name keeps the real characters, the plain name stays
+// ASCII so clients without RFC 5987 still get one.
+func TestContentDispositionAttachment(t *testing.T) {
+	t.Parallel()
+
+	got := contentDispositionAttachment("罗技_2026-11-01.mp4")
+	require.Contains(t, got, `filename*=UTF-8''%E7%BD%97%E6%8A%80_2026-11-01.mp4`)
+	// Each non-ASCII rune collapses to one underscore; the separator that was
+	// already in the name is kept as-is.
+	require.Contains(t, got, `filename="___2026-11-01.mp4"`)
+
+	// A name that is already ASCII must survive unchanged in both forms.
+	got = contentDispositionAttachment("clip.mp4")
+	require.Contains(t, got, `filename="clip.mp4"`)
+	require.Contains(t, got, `filename*=UTF-8''clip.mp4`)
+
+	// Characters that are not attr-char must be escaped in the extended form:
+	// '=' would otherwise cut the ext-value short for a strict parser.
+	got = contentDispositionAttachment("a=b.mp4")
+	require.Contains(t, got, `filename*=UTF-8''a%3Db.mp4`)
+	require.Contains(t, got, `filename="a=b.mp4"`)
 }
 
 // --- helpers ---

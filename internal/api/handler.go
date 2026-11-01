@@ -526,6 +526,11 @@ func (h *Handler) registerMediaRoutes(r chi.Router) {
 	r.Get("/api/cameras/{cameraID}/playback/playlist.m3u8", h.handlePlaybackPlaylist)
 	r.Get("/api/cameras/{cameraID}/playback/{recordingID}/{segName}", h.handlePlaybackSegment)
 	r.Get("/api/cameras/{cameraID}/download-range", h.handleDownloadRange)
+	// HEAD for the browser's download probe: it asks for the headers first to
+	// learn the file name. Answering 405 there makes the browser abandon the
+	// download and render the MP4 in the tab instead — see
+	// handleDownloadRange for the full failure mode.
+	r.Head("/api/cameras/{cameraID}/download-range", h.handleDownloadRange)
 	r.Get("/api/offload/objects/{id}", h.handleOffloadObject)
 	r.Head("/api/offload/objects/{id}", h.handleOffloadObject)
 }
