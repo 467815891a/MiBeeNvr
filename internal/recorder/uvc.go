@@ -528,6 +528,7 @@ func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *
 		windowStart = time.Now()
 		windowFrame int64
 		windowByte  int64
+		reportCount int
 	)
 	var frameIndex int64
 
@@ -555,6 +556,8 @@ func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *
 			return
 		}
 		windowStart = time.Now()
+		// The per-window counters describe THIS window only — leaving them
+		// accumulated would report a rate that grows with every window.
 		fps := float64(windowFrame) / elapsed.Seconds()
 		mbps := float64(windowByte) * 8 / elapsed.Seconds() / 1e6
 		attrs := []any{
@@ -568,6 +571,8 @@ func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *
 			"total_frames", rateFrames,
 			"total_bytes", rateBytes,
 		}
+		windowFrame = 0
+		windowByte = 0
 		if need, ok := usbBandwidthNeedMbps(format); ok {
 			attrs = append(attrs, "usb_need_mbps", math.Round(need*100) / 100)
 		} else {
@@ -575,7 +580,11 @@ func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *
 			// encoded stream — the measured frame rate is the reference.
 			attrs = append(attrs, "usb_need_mbps", "unknown (compressed pin)")
 		}
-		if format.FPS > 0 && fps > 0 && fps < float64(format.FPS)*0.9 {
+		reportCount++
+		// The first window covers ffmpeg's warm-up and the device
+		// negotiation — it is not a steady-state rate, so it must not be
+		// judged against the target.
+		if reportCount > 1 && format.FPS > 0 && fps > 0 && fps < float64(format.FPS)*0.9 {
 			uvcLogger.Warn("uvc capture rate below target — the USB link may not keep up",
 				append(attrs, "reason", "dropped frames")...)
 			return
