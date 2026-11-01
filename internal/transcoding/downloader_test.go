@@ -2,6 +2,7 @@ package transcoding
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -28,9 +29,10 @@ func newTestDownloader(t *testing.T) *Downloader {
 }
 
 // mustCreateFakeFFmpeg creates a fake ffmpeg shell script that responds to -version.
+// The file name matches FFmpegPath() on the current platform (.exe on Windows).
 func mustCreateFakeFFmpeg(t *testing.T, dir string) string {
 	t.Helper()
-	p := filepath.Join(dir, "ffmpeg")
+	p := filepath.Join(dir, exeName("ffmpeg"))
 	content := "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\necho 'ffmpeg version 7.0-static'\nexit 0\nfi\nexit 0\n"
 	if err := os.WriteFile(p, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake ffmpeg: %v", err)
@@ -121,6 +123,9 @@ func TestGetFFmpegStatus_NotInstalled(t *testing.T) {
 
 // TestGetFFmpegStatus_Available verifies status when valid FFmpeg exists.
 func TestGetFFmpegStatus_Available(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ffmpeg is a shell script — not executable on Windows")
+	}
 	dir := t.TempDir()
 	mustCreateToolsDir(t, dir)
 	mustCreateFakeFFmpeg(t, filepath.Join(dir, "tools"))
@@ -159,6 +164,9 @@ func TestGetFFmpegStatus_Downloading(t *testing.T) {
 
 // TestDownload_Idempotent verifies that downloading when FFmpeg already exists returns nil.
 func TestDownload_Idempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ffmpeg is a shell script — not executable on Windows")
+	}
 	dir := t.TempDir()
 	mustCreateToolsDir(t, dir)
 	mustCreateFakeFFmpeg(t, filepath.Join(dir, "tools"))
@@ -213,14 +221,16 @@ func TestDownload_TarGzExtraction(t *testing.T) {
 		t.Fatalf("ffprobe content mismatch: got %q, want %q", string(ffprobeData), string(ffprobeContent))
 	}
 
-	// Verify both are executable
-	for _, path := range []string{d.FFmpegPath(), d.FFprobePath()} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat %s: %v", path, err)
-		}
-		if info.Mode()&0o111 == 0 {
-			t.Fatalf("%s should be executable", path)
+	// Verify both are executable (Unix exec bits; Windows stat never reports them)
+	if runtime.GOOS != "windows" {
+		for _, path := range []string{d.FFmpegPath(), d.FFprobePath()} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat %s: %v", path, err)
+			}
+			if info.Mode()&0o111 == 0 {
+				t.Fatalf("%s should be executable", path)
+			}
 		}
 	}
 
@@ -321,7 +331,7 @@ func TestDownload_RawBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Fatal("should be executable")
 	}
 }
@@ -577,9 +587,9 @@ func TestGetDownloadURL(t *testing.T) {
 		{"linux", "amd64", "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz"},
 		{"linux", "arm64", "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-arm64-static.tar.xz"},
 		{"linux", "arm", "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-armhf-static.tar.xz"},
+		{"windows", "amd64", "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"},
 		{"darwin", "amd64", ""},
 		{"darwin", "arm64", ""},
-		{"windows", "amd64", ""},
 	}
 
 	for _, tc := range tests {
@@ -594,10 +604,10 @@ func TestGetDownloadURL(t *testing.T) {
 
 // TestDownload_UnsupportedPlatform verifies error on unsupported platform.
 func TestDownload_UnsupportedPlatform(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("this test needs a non-linux GOOS, but we can't change runtime.GOOS")
+	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+		t.Skip("linux and windows have a default download URL; can't simulate an unsupported platform")
 	}
-	// On non-linux, downloadOnce should fail with unsupported platform
+	// On darwin and other unsupported platforms, downloadOnce should fail
 	d := newTestDownloader(t)
 	err := d.downloadOnce(context.Background())
 	if err == nil {
@@ -608,7 +618,7 @@ func TestDownload_UnsupportedPlatform(t *testing.T) {
 // TestFFmpegPath verifies paths are correct.
 func TestFFmpegPath(t *testing.T) {
 	d := NewDownloader("/data", nil)
-	want := filepath.Join("/data", "tools", "ffmpeg")
+	want := filepath.Join("/data", "tools", exeName("ffmpeg"))
 	if d.FFmpegPath() != want {
 		t.Fatalf("FFmpegPath = %q, want %q", d.FFmpegPath(), want)
 	}
@@ -617,9 +627,78 @@ func TestFFmpegPath(t *testing.T) {
 // TestFFprobePath verifies ffprobe path is correct.
 func TestFFprobePath(t *testing.T) {
 	d := NewDownloader("/data", nil)
-	want := filepath.Join("/data", "tools", "ffprobe")
+	want := filepath.Join("/data", "tools", exeName("ffprobe"))
 	if d.FFprobePath() != want {
 		t.Fatalf("FFprobePath = %q, want %q", d.FFprobePath(), want)
+	}
+}
+
+// TestDownload_ZipExtraction verifies download + extraction of a Windows-style
+// .zip build (gyan.dev layout: nested bin/ffmpeg.exe + bin/ffprobe.exe).
+func TestDownload_ZipExtraction(t *testing.T) {
+	ffmpegContent := []byte("fake ffmpeg PE binary")
+	ffprobeContent := []byte("fake ffprobe PE binary")
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range []struct{ name string; content []byte }{
+		{"ffmpeg-8.0-essentials_build/bin/ffmpeg.exe", ffmpegContent},
+		{"ffmpeg-8.0-essentials_build/bin/ffprobe.exe", ffprobeContent},
+		{"ffmpeg-8.0-essentials_build/LICENSE.txt", []byte("docs")},
+	} {
+		w, err := zw.Create(e.name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", e.name, err)
+		}
+		if _, err := w.Write(e.content); err != nil {
+			t.Fatalf("zip write %s: %v", e.name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	archive := buf.Bytes()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(archive)))
+		w.Write(archive)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	d := NewDownloader(dir, nil)
+
+	url := srv.URL + "/ffmpeg-release-essentials.zip"
+	if err := d.downloadOnceWithURL(context.Background(), url); err != nil {
+		t.Fatalf("downloadOnceWithURL: %v", err)
+	}
+
+	// Extracted to the platform binary names, flattened into tools/
+	ffmpegData, err := os.ReadFile(d.FFmpegPath())
+	if err != nil {
+		t.Fatalf("read ffmpeg: %v", err)
+	}
+	if !bytes.Equal(ffmpegData, ffmpegContent) {
+		t.Fatalf("ffmpeg content mismatch: got %q", string(ffmpegData))
+	}
+	ffprobeData, err := os.ReadFile(d.FFprobePath())
+	if err != nil {
+		t.Fatalf("read ffprobe: %v", err)
+	}
+	if !bytes.Equal(ffprobeData, ffprobeContent) {
+		t.Fatalf("ffprobe content mismatch: got %q", string(ffprobeData))
+	}
+
+	// Non-binary entries (LICENSE.txt) must not leak into tools/
+	toolsDir := filepath.Join(dir, "tools")
+	entries, err := os.ReadDir(toolsDir)
+	if err != nil {
+		t.Fatalf("readdir tools: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(d.FFmpegPath()) && e.Name() != filepath.Base(d.FFprobePath()) {
+			t.Fatalf("unexpected file in tools/: %s", e.Name())
+		}
 	}
 }
 
@@ -781,12 +860,12 @@ func TestDownload_FFprobeExtractedAndExecutable(t *testing.T) {
 		t.Fatalf("downloadOnceWithURL: %v", err)
 	}
 
-	// Verify ffprobe is executable
+	// Verify ffprobe is executable (Unix exec bits; Windows stat never reports them)
 	info, err := os.Stat(d.FFprobePath())
 	if err != nil {
 		t.Fatalf("stat ffprobe: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Fatal("ffprobe should be executable")
 	}
 

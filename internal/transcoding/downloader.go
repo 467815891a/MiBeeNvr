@@ -2,6 +2,7 @@ package transcoding
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -26,6 +28,9 @@ var getDownloadURL = defaultDownloadURL
 // DownloadMirror overrides the FFmpeg static-build host when non-empty
 // (config transcoding.download_mirror); the platform filename is appended.
 // Set once at wiring, before any download starts.
+//
+// The mirror hosts johnvansickle-style Linux static builds only — Windows
+// downloads (gyan.dev zips) always use the official URL.
 var DownloadMirror string
 
 func defaultDownloadURL(goos, goarch string) string {
@@ -40,9 +45,23 @@ func defaultDownloadURL(goos, goarch string) string {
 		return base + "/ffmpeg-git-arm64-static.tar.xz"
 	case "linux/arm":
 		return base + "/ffmpeg-git-armhf-static.tar.xz"
+	case "windows/amd64":
+		// gyan.dev release essentials zip: ships ffmpeg.exe/ffprobe.exe and
+		// includes the QSV (Intel Quick Sync) encoders/decoders plus
+		// libx264/libx265. Stable "release" URL; no mirror override.
+		return "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 	default:
 		return ""
 	}
+}
+
+// exeName appends the Windows executable extension when running on Windows,
+// so {dataDir}/tools/ffmpeg resolves to ffmpeg.exe there.
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
 }
 
 // Downloader manages FFmpeg static binary downloads.
@@ -79,12 +98,12 @@ func NewDownloader(dataDir string, onProgress func(downloaded, total int64)) *Do
 
 // FFmpegPath returns the expected FFmpeg binary path.
 func (d *Downloader) FFmpegPath() string {
-	return filepath.Join(d.dataDir, "tools", "ffmpeg")
+	return filepath.Join(d.dataDir, "tools", exeName("ffmpeg"))
 }
 
 // FFprobePath returns the expected ffprobe binary path.
 func (d *Downloader) FFprobePath() string {
-	return filepath.Join(d.dataDir, "tools", "ffprobe")
+	return filepath.Join(d.dataDir, "tools", exeName("ffprobe"))
 }
 
 // StatePath returns the path for download state persistence.
@@ -365,9 +384,15 @@ func (d *Downloader) extractArchive(archivePath, toolsDir, url string) error {
 			// Wait for xz to finish after tar reading completes
 			_ = cmd.Wait()
 		}()
+	} else if strings.HasSuffix(url, ".zip") {
+		return d.extractZip(archivePath, toolsDir)
 	} else {
 		// Not an archive — treat as raw binary (legacy behavior)
-		if err := os.Rename(archivePath, d.FFmpegPath()); err != nil {
+		// Release the open handle first: Go opens files on Windows without
+		// FILE_SHARE_DELETE, so renaming an open file fails with a sharing
+		// violation (renaming under an open handle is fine on Linux).
+		f.Close()
+		if err := renameWithRetry(archivePath, d.FFmpegPath()); err != nil {
 			return fmt.Errorf("rename to ffmpeg: %w", err)
 		}
 		// Don't remove archive since we renamed it
@@ -385,11 +410,15 @@ func (d *Downloader) extractArchive(archivePath, toolsDir, url string) error {
 			return fmt.Errorf("tar read error (corrupt archive?): %w", err)
 		}
 
-		// Get the base filename (strip directory prefix)
-		baseName := filepath.Base(hdr.Name)
-
-		// Only extract ffmpeg and ffprobe (skip docs, man pages, etc.)
-		if baseName != "ffmpeg" && baseName != "ffprobe" {
+		// Match the executable base name with or without .exe, case-insensitively,
+		// and write it to the platform binary name (ffmpeg.exe on Windows).
+		var target string
+		switch strings.ToLower(filepath.Base(hdr.Name)) {
+		case "ffmpeg", "ffmpeg.exe":
+			target = exeName("ffmpeg")
+		case "ffprobe", "ffprobe.exe":
+			target = exeName("ffprobe")
+		default:
 			continue
 		}
 
@@ -398,38 +427,121 @@ func (d *Downloader) extractArchive(archivePath, toolsDir, url string) error {
 			continue
 		}
 
-		targetPath := filepath.Join(toolsDir, baseName)
+		targetPath := filepath.Join(toolsDir, target)
 
 		// Atomic write: extract to .tmp first, then rename
 		tmpTarget := targetPath + ".tmp2"
 		outFile, err := os.OpenFile(tmpTarget, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
-			return fmt.Errorf("create %s: %w", baseName, err)
+			return fmt.Errorf("create %s: %w", target, err)
 		}
 
 		if _, err := io.Copy(outFile, tarReader); err != nil {
 			outFile.Close()
 			os.Remove(tmpTarget)
-			return fmt.Errorf("extract %s: %w", baseName, err)
+			return fmt.Errorf("extract %s: %w", target, err)
 		}
 		outFile.Close()
 
 		if err := os.Chmod(tmpTarget, 0o755); err != nil {
 			os.Remove(tmpTarget)
-			return fmt.Errorf("chmod %s: %w", baseName, err)
+			return fmt.Errorf("chmod %s: %w", target, err)
 		}
 
-		if err := os.Rename(tmpTarget, targetPath); err != nil {
+		if err := renameWithRetry(tmpTarget, targetPath); err != nil {
 			os.Remove(tmpTarget)
-			return fmt.Errorf("rename %s: %w", baseName, err)
+			return fmt.Errorf("rename %s: %w", target, err)
 		}
 
 		extracted++
-		slog.Info("Extracted binary from archive", "name", baseName, "path", targetPath)
+		slog.Info("Extracted binary from archive", "name", target, "path", targetPath)
 	}
 
 	if extracted == 0 {
 		return fmt.Errorf("archive contained no ffmpeg or ffprobe binaries")
+	}
+
+	return nil
+}
+
+// renameWithRetry renames oldPath → newPath, retrying briefly. On Windows the
+// source or destination can transiently appear locked ("being used by another
+// process") right after being written — e.g. antivirus scanning a freshly
+// downloaded archive.
+func renameWithRetry(oldPath, newPath string) error {
+	var err error
+	for attempt := range 5 {
+		if attempt > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if err = os.Rename(oldPath, newPath); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// extractZip extracts ffmpeg/ffprobe from a Windows zip build (e.g. the
+// gyan.dev essentials zip, which nests them under ffmpeg-x.y-essentials_build/bin/).
+func (d *Downloader) extractZip(archivePath, toolsDir string) error {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer zr.Close()
+
+	extracted := 0
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+
+		// Zip entry names use "/" separators regardless of platform; match the
+		// executable base name case-insensitively, with or without .exe.
+		var target string
+		switch strings.ToLower(path.Base(zf.Name)) {
+		case "ffmpeg", "ffmpeg.exe":
+			target = exeName("ffmpeg")
+		case "ffprobe", "ffprobe.exe":
+			target = exeName("ffprobe")
+		default:
+			continue
+		}
+
+		rc, err := zf.Open()
+		if err != nil {
+			return fmt.Errorf("open %s in zip: %w", zf.Name, err)
+		}
+
+		targetPath := filepath.Join(toolsDir, target)
+		// Atomic write: extract to .tmp first, then rename
+		tmpTarget := targetPath + ".tmp2"
+		outFile, err := os.OpenFile(tmpTarget, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			rc.Close()
+			return fmt.Errorf("create %s: %w", target, err)
+		}
+
+		if _, err := io.Copy(outFile, rc); err != nil {
+			outFile.Close()
+			rc.Close()
+			os.Remove(tmpTarget)
+			return fmt.Errorf("extract %s: %w", zf.Name, err)
+		}
+		outFile.Close()
+		rc.Close()
+
+		if err := renameWithRetry(tmpTarget, targetPath); err != nil {
+			os.Remove(tmpTarget)
+			return fmt.Errorf("rename %s: %w", target, err)
+		}
+
+		extracted++
+		slog.Info("Extracted binary from zip archive", "name", zf.Name, "path", targetPath)
+	}
+
+	if extracted == 0 {
+		return fmt.Errorf("zip archive contained no ffmpeg or ffprobe binaries")
 	}
 
 	return nil

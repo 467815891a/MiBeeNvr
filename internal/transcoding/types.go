@@ -14,6 +14,7 @@ const (
 	EncoderV4L2M2M  EncoderType = "v4l2m2m"
 	EncoderVAAPI    EncoderType = "vaapi"
 	EncoderNVENC    EncoderType = "nvenc"
+	EncoderQSV      EncoderType = "qsv"
 )
 
 // TranscodeStatus represents the status of a transcoding task.

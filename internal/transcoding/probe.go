@@ -96,8 +96,13 @@ func probeHardware(ffmpegPath string) *HardwareCapabilities {
 	return caps
 }
 
-// detectCPU reads /proc/cpuinfo and counts processor lines.
+// detectCPU counts CPU cores. Linux reads /proc/cpuinfo; Windows has no
+// cpuinfo file — runtime.NumCPU() is exact there, so skip the read (and its
+// warning log).
 func detectCPU() int {
+	if runtime.GOOS == "windows" {
+		return runtime.NumCPU()
+	}
 	return detectCPUFromFile("/proc/cpuinfo")
 }
 
@@ -121,8 +126,12 @@ func detectCPUFromFile(path string) int {
 	return count
 }
 
-// detectMemory reads /proc/meminfo and returns total RAM in MB.
+// detectMemory returns total RAM in MB. Linux reads /proc/meminfo; Windows
+// uses GlobalMemoryStatusEx (probe_windows.go).
 func detectMemory() uint64 {
+	if runtime.GOOS == "windows" {
+		return windowsTotalMemoryMB()
+	}
 	return detectMemoryFromFile("/proc/meminfo")
 }
 
@@ -168,15 +177,32 @@ func probeEncoders(ffmpegPath string, caps *HardwareCapabilities) *HardwareCapab
 			{"libx265", EncoderSoftware},
 		}
 	case "amd64":
-		h264Candidates = []encoder{
-			{"h264_vaapi", EncoderVAAPI},
-			{"h264_nvenc", EncoderNVENC},
-			{"libx264", EncoderSoftware},
-		}
-		h265Candidates = []encoder{
-			{"hevc_vaapi", EncoderVAAPI},
-			{"hevc_nvenc", EncoderNVENC},
-			{"libx265", EncoderSoftware},
+		if runtime.GOOS == "windows" {
+			// Windows: no VAAPI. Intel Quick Sync first (the primary Windows
+			// desktop target), then NVENC for NVIDIA GPUs, then software.
+			// QSV candidates are smoke-tested in testEncoder — being listed in
+			// ffmpeg -encoders does not imply a working GPU/driver.
+			h264Candidates = []encoder{
+				{"h264_qsv", EncoderQSV},
+				{"h264_nvenc", EncoderNVENC},
+				{"libx264", EncoderSoftware},
+			}
+			h265Candidates = []encoder{
+				{"hevc_qsv", EncoderQSV},
+				{"hevc_nvenc", EncoderNVENC},
+				{"libx265", EncoderSoftware},
+			}
+		} else {
+			h264Candidates = []encoder{
+				{"h264_vaapi", EncoderVAAPI},
+				{"h264_nvenc", EncoderNVENC},
+				{"libx264", EncoderSoftware},
+			}
+			h265Candidates = []encoder{
+				{"hevc_vaapi", EncoderVAAPI},
+				{"hevc_nvenc", EncoderNVENC},
+				{"libx265", EncoderSoftware},
+			}
 		}
 	default:
 		h264Candidates = []encoder{{"libx264", EncoderSoftware}}
@@ -296,6 +322,15 @@ func testEncoder(ffmpegPath, encoder string) bool {
 		}
 	}
 
+	// QSV encoders are compiled into Windows/Linux FFmpeg builds but fail at
+	// runtime without an Intel GPU and driver. Smoke test: encode 1 frame.
+	if strings.Contains(encoder, "qsv") {
+		if !smokeTestEncoder(ffmpegPath, encoder) {
+			slog.Debug("QSV encoder listed but smoke test failed — no Intel GPU or driver", "encoder", encoder)
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -350,7 +385,7 @@ func estimateFPS(caps *HardwareCapabilities) float64 {
 		fps = float64(caps.TotalCores) * 5.0
 	case EncoderVAAPI:
 		fps = 30.0
-	case EncoderNVENC:
+	case EncoderNVENC, EncoderQSV:
 		fps = 60.0
 	case EncoderSoftware:
 		switch caps.Arch {
@@ -425,9 +460,22 @@ func probeDecoders(ffmpegPath string, caps *HardwareCapabilities) *HardwareCapab
 			{"hevc_v4l2m2m", EncoderV4L2M2M},
 		}
 	case "amd64":
-		// Software decoders always fast enough on x86
-		h264Candidates = []decoder{{"h264", EncoderSoftware}}
-		h265Candidates = []decoder{{"hevc", EncoderSoftware}}
+		if runtime.GOOS == "windows" {
+			// Windows: prefer QSV hardware decoding (smoke-tested in
+			// testDecoder), falling back to software — always fast enough on x86.
+			h264Candidates = []decoder{
+				{"h264_qsv", EncoderQSV},
+				{"h264", EncoderSoftware},
+			}
+			h265Candidates = []decoder{
+				{"hevc_qsv", EncoderQSV},
+				{"hevc", EncoderSoftware},
+			}
+		} else {
+			// Software decoders always fast enough on x86
+			h264Candidates = []decoder{{"h264", EncoderSoftware}}
+			h265Candidates = []decoder{{"hevc", EncoderSoftware}}
+		}
 	default:
 		h264Candidates = []decoder{{"h264", EncoderSoftware}}
 		h265Candidates = []decoder{{"hevc", EncoderSoftware}}
@@ -512,7 +560,77 @@ func testDecoder(ffmpegPath, decoder string) bool {
 		return false
 	}
 
+	// QSV decoders are compiled into most FFmpeg builds but fail at runtime
+	// without an Intel GPU and driver. Smoke test: decode 1 generated frame.
+	if strings.Contains(decoder, "qsv") && !smokeTestDecoder(ffmpegPath, decoder) {
+		slog.Debug("QSV decoder listed but smoke test failed — no Intel GPU or driver", "decoder", decoder)
+		return false
+	}
+
 	return true
+}
+
+// smokeTestDecoder verifies a hardware decoder can actually decode: it first
+// encodes two tiny frames with a software encoder (always available), then
+// pushes them through the candidate decoder. Some FFmpeg builds list QSV
+// decoders even when the machine has no Intel GPU — the probe must not select
+// them, or every transcode dies at decoder init.
+var smokeTestDecoder = func(ffmpegPath, decoder string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	format := "h264"
+	swEncoder := "libx264"
+	if strings.HasPrefix(decoder, "hevc") {
+		format = "hevc"
+		swEncoder = "libx265"
+	}
+
+	// Generate a tiny raw bitstream to a temp file, then decode one frame of it.
+	tmp := filepath.Join(os.TempDir(),
+		fmt.Sprintf("mibee-smoke-%s-%d.%s", format, os.Getpid(), format))
+	defer os.Remove(tmp)
+
+	gen := exec.CommandContext(ctx, ffmpegPath,
+		"-f", "lavfi", "-i", "color=c=black:s=320x240:d=0.2:r=10",
+		"-frames:v", "2", "-c:v", swEncoder, "-f", format, "-y", tmp)
+	var genStderr bytes.Buffer
+	gen.Stderr = &genStderr
+	if err := gen.Run(); err != nil {
+		slog.Debug("Decoder smoke test: sample generation failed",
+			"decoder", decoder, "error", err, "stderr", genStderr.String())
+		return false
+	}
+
+	dec := exec.CommandContext(ctx, ffmpegPath, decodeSmokeArgs(decoder, format, tmp)...)
+	var decStderr bytes.Buffer
+	dec.Stderr = &decStderr
+	if err := dec.Run(); err != nil {
+		slog.Debug("Decoder smoke test failed",
+			"decoder", decoder, "error", err, "stderr", decStderr.String())
+		return false
+	}
+	return true
+}
+
+// decodeSmokeArgs builds the decode command for a decoder smoke test. QSV
+// decoders run in hwaccel form requiring hardware (qsv) output frames: on a
+// machine without a working Intel GPU/driver the hwaccel init fails, so a
+// silent software fallback can never false-positive the probe.
+func decodeSmokeArgs(decoder, format, samplePath string) []string {
+	if strings.Contains(decoder, "qsv") {
+		return []string{
+			"-hwaccel", "qsv", "-hwaccel_output_format", "qsv",
+			"-c:v", strings.TrimSuffix(decoder, "_qsv"),
+			"-f", format, "-i", samplePath,
+			"-frames:v", "1", "-f", "null", "-",
+		}
+	}
+	return []string{
+		"-c:v", decoder,
+		"-f", format, "-i", samplePath,
+		"-frames:v", "1", "-f", "null", "-",
+	}
 }
 
 // setResolutionLimits sets MaxEncodeWidth/MaxEncodeHeight based on encoder type.
@@ -521,7 +639,7 @@ func setResolutionLimits(caps *HardwareCapabilities) {
 	case EncoderV4L2M2M:
 		caps.MaxEncodeWidth = 1920
 		caps.MaxEncodeHeight = 1440
-	case EncoderVAAPI, EncoderNVENC:
+	case EncoderVAAPI, EncoderNVENC, EncoderQSV:
 		caps.MaxEncodeWidth = 4096
 		caps.MaxEncodeHeight = 4096
 	default:

@@ -18,6 +18,12 @@ import (
 
 var mgrLogger = slogx.Component("transcode-manager")
 
+// FFprobeSiblingPath returns the ffprobe binary path expected next to a known
+// ffmpeg path, with the Windows .exe suffix when running on Windows.
+func FFprobeSiblingPath(ffmpegPath string) string {
+	return filepath.Join(filepath.Dir(ffmpegPath), exeName("ffprobe"))
+}
+
 // Package-level disabled reason — set by main.go when NewTranscodeManager fails.
 // Used by GetStatus() nil path and API handler to report why transcoding is disabled.
 var (
@@ -83,7 +89,7 @@ func NewTranscodeManager(store *storage.DB, cfg ManagerConfig, m *metrics.Metric
 	}
 	ffprobePath := cfg.FFprobePath
 	if ffprobePath == "" {
-		ffprobePath = filepath.Join(filepath.Dir(ffmpegPath), "ffprobe")
+		ffprobePath = FFprobeSiblingPath(ffmpegPath)
 	}
 
 	// Parse job timeout from config string

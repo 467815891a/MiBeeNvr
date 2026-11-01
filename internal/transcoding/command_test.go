@@ -386,6 +386,124 @@ func TestBuildCommand_NVENC(t *testing.T) {
 	argsContain(t, args, "-b:a", "64k")
 }
 
+// Helper: QSV capabilities.
+func qsvCaps() HardwareCapabilities {
+	return HardwareCapabilities{
+		Arch:            "amd64",
+		H264Encoder:     "h264_qsv",
+		H265Encoder:     "hevc_qsv",
+		H264EncoderType: EncoderQSV,
+		H265EncoderType: EncoderQSV,
+		FFmpegAvailable: true,
+	}
+}
+
+func TestBuildCommand_QSV(t *testing.T) {
+	t.Run("maps ultrafast to veryfast", func(t *testing.T) {
+		opts := h264ToH265Opts()
+		opts.Preset = "ultrafast" // per-camera config default preset
+		args, err := BuildFFmpegCommand(opts, qsvCaps())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		argsContain(t, args, "-c:v", "hevc_qsv")
+		// x264-style "ultrafast" must be mapped to a valid QSV tier, not
+		// passed through (FFmpeg would abort with an invalid preset).
+		argsContain(t, args, "-preset", "veryfast")
+		// QSV has no CRF support.
+		argsNotContain(t, args, "-crf")
+	})
+
+	t.Run("valid preset passes through", func(t *testing.T) {
+		opts := h264ToH265Opts()
+		opts.Preset = "slow"
+		args, err := BuildFFmpegCommand(opts, qsvCaps())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		argsContain(t, args, "-preset", "slow")
+	})
+
+	t.Run("empty preset omits flag", func(t *testing.T) {
+		opts := h264ToH265Opts()
+		opts.Preset = ""
+		args, err := BuildFFmpegCommand(opts, qsvCaps())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		argsNotContain(t, args, "-preset")
+	})
+}
+
+func TestBuildCommand_QSV_HWDecode(t *testing.T) {
+	t.Run("h265 input uses qsv hwaccel with hevc decoder", func(t *testing.T) {
+		caps := qsvCaps()
+		caps.H265Decoder = "hevc_qsv"
+		caps.H265DecoderType = EncoderQSV
+		opts := h264ToH265Opts()
+		opts.InputCodec = "h265"
+		args, err := BuildFFmpegCommand(opts, caps)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		argsContain(t, args, "-hwaccel", "qsv", "-hwaccel_output_format", "nv12", "-c:v", "hevc")
+		// Input flags must precede -i.
+		if idxHwaccel, idxInput := indexOf(args, "-hwaccel"), indexOf(args, "-i"); idxHwaccel > idxInput {
+			t.Fatalf("-hwaccel (at %d) must come before -i (at %d): %v", idxHwaccel, idxInput, args)
+		}
+	})
+
+	t.Run("h264 input uses qsv hwaccel", func(t *testing.T) {
+		caps := qsvCaps()
+		caps.H264Decoder = "h264_qsv"
+		caps.H264DecoderType = EncoderQSV
+		args, err := BuildFFmpegCommand(h264ToH265Opts(), caps)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		argsContain(t, args, "-hwaccel", "qsv", "-hwaccel_output_format", "nv12", "-c:v", "h264")
+	})
+
+	t.Run("software decoders skip hwaccel", func(t *testing.T) {
+		caps := qsvCaps()
+		caps.H265Decoder = "hevc"
+		caps.H265DecoderType = EncoderSoftware
+		args, err := BuildFFmpegCommand(h264ToH265Opts(), caps)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		argsNotContain(t, args, "-hwaccel")
+	})
+
+	t.Run("mjpeg input skips hwaccel", func(t *testing.T) {
+		caps := qsvCaps()
+		caps.H264Decoder = "h264_qsv"
+		caps.H264DecoderType = EncoderQSV
+		opts := TranscodeOptions{
+			InputPath:   "/tmp/frames",
+			OutputPath:  "/tmp/out.mp4",
+			InputCodec:  "mjpeg",
+			OutputCodec: "h264",
+			Framerate:   15,
+		}
+		args, err := BuildFFmpegCommand(opts, caps)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		argsNotContain(t, args, "-hwaccel")
+	})
+}
+
+// indexOf returns the index of s in args, or -1.
+func indexOf(args []string, s string) int {
+	for i, a := range args {
+		if a == s {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestBuildCommand_JPEGToH264(t *testing.T) {
 	opts := TranscodeOptions{
 		InputPath:   "/tmp/frames",

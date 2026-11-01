@@ -27,6 +27,10 @@ func BuildFFmpegCommand(opts TranscodeOptions, caps HardwareCapabilities) ([]str
 		args = append(args, "-framerate", strconv.Itoa(opts.Framerate))
 		args = append(args, "-i", filepath.Join(opts.InputPath, "%*.jpg"))
 	} else {
+		// Hardware decode when a QSV decoder was probed; the hwaccel form
+		// outputs system-memory (nv12) frames so the software scale filter and
+		// both software and QSV encoders stay compatible.
+		args = append(args, buildVideoHWDecodeArgs(inputCodec, caps)...)
 		args = append(args, "-i", opts.InputPath)
 	}
 
@@ -150,6 +154,13 @@ func buildVideoEncoderArgs(opts TranscodeOptions, caps HardwareCapabilities) ([]
 		if opts.InputCodec == "mjpeg" || opts.InputCodec == "jpeg" {
 			args = append(args, "-vf", "format=yuv420p")
 		}
+	case strings.Contains(encoder, "qsv"):
+		// QSV presets are veryfast..veryslow; map x264-style names to the
+		// nearest valid tier (e.g. "ultrafast" would abort FFmpeg). CRF is not
+		// supported by QSV — quality is governed by bitrate.
+		if preset := qsvPreset(opts.Preset); preset != "" {
+			args = append(args, "-preset", preset)
+		}
 	case strings.Contains(encoder, "vaapi"):
 		// VAAPI needs hwaccel init flags
 		args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
@@ -190,9 +201,54 @@ func buildVideoEncoderArgs(opts TranscodeOptions, caps HardwareCapabilities) ([]
 	return args, nil
 }
 
+// buildVideoHWDecodeArgs returns input flags that route video decoding through
+// a probed QSV hardware decoder, or nil for software decode. The hwaccel form
+// (rather than the dedicated *_qsv decoders) downloads frames to system memory,
+// keeping the software scale filter and every encoder compatible — same
+// pipeline as the live transcoder. Only QSV is wired: v4l2m2m uses dedicated
+// decoder names and VAAPI needs device-specific handling on the Linux paths.
+// Note: the nv12 output format assumes 8-bit sources (H.264 / HEVC Main).
+// 10-bit HEVC (Main10) needs p010 and will fail hwaccel setup — such a job
+// errors out instead of silently transcoding with wrong colors. Camera
+// recordings are 8-bit in practice.
+func buildVideoHWDecodeArgs(inputCodec string, caps HardwareCapabilities) []string {
+	if isMJPEGInput(inputCodec) {
+		return nil
+	}
+
+	decoderType := caps.H265DecoderType
+	if inputCodec == "h264" {
+		decoderType = caps.H264DecoderType
+	}
+	if decoderType != EncoderQSV {
+		return nil
+	}
+
+	// ffmpeg's decoder name for H.265 is "hevc"; the others match as-is.
+	decoderName := inputCodec
+	if inputCodec == "h265" {
+		decoderName = "hevc"
+	}
+	return []string{"-hwaccel", "qsv", "-hwaccel_output_format", "nv12", "-c:v", decoderName}
+}
+
 // isARMArch returns true if the architecture is ARM (32-bit or 64-bit).
 func isARMArch(arch string) bool {
 	return arch == "arm64" || arch == "arm"
+}
+
+// qsvPreset maps an x264-style preset name to a valid QSV preset tier.
+// QSV only accepts veryfast/faster/fast/medium/slow/slower/veryslow; unknown
+// or empty values return "" (encoder default, medium).
+func qsvPreset(preset string) string {
+	switch preset {
+	case "ultrafast", "superfast", "veryfast":
+		return "veryfast"
+	case "faster", "fast", "medium", "slow", "slower", "veryslow":
+		return preset
+	default:
+		return ""
+	}
 }
 
 // isSoftwareEncoder returns true if the encoder name is a software encoder.

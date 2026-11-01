@@ -485,8 +485,11 @@ observability:
 # Transcoding — optional video transcoding via FFmpeg
 # Used to reduce bitrate, change codec format, or adjust quality
 # Requires ffmpeg to be installed on the system
+# Windows: FFmpeg (gyan.dev essentials build, incl. Intel QSV) is auto-downloaded
+#   when missing, and hardware encoders/decoders are probed automatically —
+#   Intel QSV first, then NVIDIA NVENC, falling back to software (libx264).
 # transcoding:
-#   download_mirror: ""              # FFmpeg static-build mirror base URL (empty = official site)
+#   download_mirror: ""              # FFmpeg static-build mirror base URL (empty = official site; Linux builds only)
 #   enabled: false              # Enable transcoding (default: false)
 #   ffmpeg_path: ""              # Path to ffmpeg binary (empty = auto-detect)
 #   max_workers: 1               # Max concurrent transcoding jobs (range: 1-4, default: 1)

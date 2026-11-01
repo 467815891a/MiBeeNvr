@@ -2,6 +2,7 @@ package transcoding
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -340,9 +341,66 @@ const testEncoderOutput = `Encoders:
  V..... h264_nvenc           NVIDIA NVENC H.264 encoder
 `
 
-// createFakeFFmpeg creates a fake ffmpeg script that outputs the given encoder and decoder lists.
+// compileMockProbeFFmpeg compiles a Go mock FFmpeg binary for Windows, where
+// Unix shell-script fakes cannot execute. Behavior is selected by mode:
+//   - "lists":  -encoders → $MOCK_ENCODER_LIST, -decoders → $MOCK_DECODER_LIST,
+//     anything else → exit 0 (satisfies encoder/decoder smoke tests)
+//   - "stderr": writes a diagnostic to stderr then the encoder list to stdout
+func compileMockProbeFFmpeg(t *testing.T, dir, mode string) string {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Skip("mock probe FFmpeg skipped in CI — external process compilation is unreliable on shared runners")
+	}
+
+	var source string
+	switch mode {
+	case "stderr":
+		source = `package main
+import "os"
+func main() {
+	os.Stderr.WriteString("error: config not found\n")
+	os.Stdout.WriteString(os.Getenv("MOCK_ENCODER_LIST"))
+}`
+	default: // "lists"
+		source = `package main
+import (
+	"fmt"
+	"os"
+)
+func main() {
+	switch {
+	case len(os.Args) > 1 && os.Args[1] == "-encoders":
+		fmt.Print(os.Getenv("MOCK_ENCODER_LIST"))
+	case len(os.Args) > 1 && os.Args[1] == "-decoders":
+		fmt.Print(os.Getenv("MOCK_DECODER_LIST"))
+	}
+}`
+	}
+
+	srcPath := filepath.Join(dir, "mockffprobe_"+mode+".go")
+	if err := os.WriteFile(srcPath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write mock source: %v", err)
+	}
+	binaryPath := filepath.Join(dir, "ffmpeg_"+mode+".exe")
+	cmd := exec.Command("go", "build", "-o", binaryPath, srcPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to compile mock probe FFmpeg: %s", string(out))
+	}
+	return binaryPath
+}
+
+// createFakeFFmpeg creates a fake ffmpeg that outputs the given encoder and decoder lists.
+// On Windows this is a compiled mock driven by env vars (shell scripts can't execute there);
+// the lists are injected via t.Setenv, which is restored when the test finishes.
 func createFakeFFmpeg(t *testing.T, encoderOutput, decoderOutput string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Setenv("MOCK_ENCODER_LIST", encoderOutput)
+		t.Setenv("MOCK_DECODER_LIST", decoderOutput)
+		return compileMockProbeFFmpeg(t, t.TempDir(), "lists")
+	}
+
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"-encoders\" ]; then\n" +
@@ -474,11 +532,17 @@ func TestTestEncoder_FFmpegFails(t *testing.T) {
 
 // TestTestEncoder_StderrCaptured verifies stderr is captured from ffmpeg -encoders.
 func TestTestEncoder_StderrCaptured(t *testing.T) {
-	dir := t.TempDir()
-	script := "#!/bin/sh\necho 'error: config not found' >&2\necho '------'\necho ' V..... libx264 desc'\nexit 0\n"
-	fakeFFmpeg := filepath.Join(dir, "ffmpeg")
-	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	var fakeFFmpeg string
+	if runtime.GOOS == "windows" {
+		t.Setenv("MOCK_ENCODER_LIST", " ------\n V..... libx264 desc\n")
+		fakeFFmpeg = compileMockProbeFFmpeg(t, t.TempDir(), "stderr")
+	} else {
+		dir := t.TempDir()
+		script := "#!/bin/sh\necho 'error: config not found' >&2\necho '------'\necho ' V..... libx264 desc'\nexit 0\n"
+		fakeFFmpeg = filepath.Join(dir, "ffmpeg")
+		if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	cachedEncoderList = nil
@@ -666,6 +730,41 @@ func TestProbeDecoders_X86Software(t *testing.T) {
 	}
 	if caps.H265DecoderType != EncoderSoftware {
 		t.Fatalf("H265DecoderType = %q, want software", caps.H265DecoderType)
+	}
+}
+
+// TestProbeEncoders_WindowsQSVFirst verifies the Windows amd64 candidate order:
+// QSV wins (when listed and the smoke test passes) over NVENC and software, and
+// QSV decoders are selected for hardware decoding.
+func TestProbeEncoders_WindowsQSVFirst(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific candidate list")
+	}
+	reset(t)
+
+	encoderOutput := testEncoderOutput +
+		" V..... h264_qsv            Intel Quick Sync Video H.264 encoder (i965 and later)\n" +
+		" V..... hevc_qsv            Intel Quick Sync Video H.265 encoder (i965 and later)\n"
+	decoderOutput := testDecoderOutput +
+		" V..... h264_qsv            Intel Quick Sync Video H.264 decoder\n" +
+		" V..... hevc_qsv            Intel Quick Sync Video HEVC decoder\n"
+	fakeFFmpeg := createFakeFFmpeg(t, encoderOutput, decoderOutput)
+
+	caps := &HardwareCapabilities{Arch: "amd64"}
+	caps = probeEncoders(fakeFFmpeg, caps)
+	if caps.H264Encoder != "h264_qsv" || caps.H264EncoderType != EncoderQSV {
+		t.Fatalf("H264Encoder = %q (%v), want h264_qsv (qsv)", caps.H264Encoder, caps.H264EncoderType)
+	}
+	if caps.H265Encoder != "hevc_qsv" || caps.H265EncoderType != EncoderQSV {
+		t.Fatalf("H265Encoder = %q (%v), want hevc_qsv (qsv)", caps.H265Encoder, caps.H265EncoderType)
+	}
+
+	caps = probeDecoders(fakeFFmpeg, caps)
+	if caps.H264Decoder != "h264_qsv" || caps.H264DecoderType != EncoderQSV {
+		t.Fatalf("H264Decoder = %q (%v), want h264_qsv (qsv)", caps.H264Decoder, caps.H264DecoderType)
+	}
+	if caps.H265Decoder != "hevc_qsv" || caps.H265DecoderType != EncoderQSV {
+		t.Fatalf("H265Decoder = %q (%v), want hevc_qsv (qsv)", caps.H265Decoder, caps.H265DecoderType)
 	}
 }
 

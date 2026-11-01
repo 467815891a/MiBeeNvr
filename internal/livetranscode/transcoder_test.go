@@ -52,7 +52,6 @@ func main() {
 	case "block-stdin":
 		source = `package main
 import "os"
-import "syscall"
 import "time"
 func main() {
 	time.Sleep(100*time.Millisecond)
@@ -60,7 +59,7 @@ func main() {
 		0x00,0x00,0x00,0x01,0x67,0x64,0x00,0x1e,0xac,
 	})
 	os.Stdout.Close()
-	for { syscall.Pause() }
+	for { time.Sleep(time.Hour) }
 }`
 	default: // "normal"
 		source = `package main
@@ -87,7 +86,9 @@ func main() {
 	err := os.WriteFile(srcPath, []byte(source), 0o644)
 	require.NoError(t, err)
 
-	binaryPath := filepath.Join(dir, "ffmpeg_"+mode)
+	// ".exe" suffix required on Windows (CreateProcess won't launch extension-less
+	// binaries); harmless on Unix where the suffix is just part of the name.
+	binaryPath := filepath.Join(dir, "ffmpeg_"+mode+".exe")
 	cmd := exec.Command("go", "build", "-o", binaryPath, srcPath)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "failed to compile mock FFmpeg: %s", string(out))
@@ -356,8 +357,15 @@ func TestLiveTranscoder_Stop_Timeout(t *testing.T) {
 	duration := time.Since(start)
 	require.NoError(t, err)
 
-	require.GreaterOrEqual(t, duration, 4*time.Second,
-		"Stop should have waited for SIGTERM timeout")
+	// Windows cannot deliver SIGTERM — Stop falls back to Kill immediately,
+	// so the graceful-shutdown wait (and its ≥4s duration) is unix-only.
+	if runtime.GOOS != "windows" {
+		require.GreaterOrEqual(t, duration, 4*time.Second,
+			"Stop should have waited for SIGTERM timeout")
+	} else {
+		require.Less(t, duration, 4*time.Second,
+			"Windows Stop should kill without the SIGTERM wait")
+	}
 
 	requireProcessGone(t, lt.cmd.Process.Pid)
 }
@@ -595,6 +603,64 @@ func TestLiveTranscoder_BuildArgs_HW(t *testing.T) {
 	require.Contains(t, args, "1280x720")
 	require.Contains(t, args, "-r")
 	require.Contains(t, args, "25")
+}
+
+// ---------------------------------------------------------------------------
+// Test: buildFFmpegArgs produces expected command line (QSV — Windows target)
+// ---------------------------------------------------------------------------
+
+func TestLiveTranscoder_BuildArgs_QSV(t *testing.T) {
+	cfg := TranscoderConfig{
+		InputCodec:  CodecH265,
+		EncoderType: EncoderAuto,
+		FFmpegPath:  "ffmpeg",
+		Preset: ResolvedPreset{
+			GopSeconds: 2, VideoBitrateKbps: 4000,
+			Resolution: "1280x720", Framerate: 25,
+			Bframes: 0,
+		},
+		HardwareCap: &transcoding.HardwareCapabilities{
+			Arch:            "amd64",
+			H264Encoder:     "h264_qsv",
+			H264EncoderType: transcoding.EncoderQSV,
+			H265Decoder:     "hevc_qsv",
+			H265DecoderType: transcoding.EncoderQSV,
+		},
+	}
+
+	lt := NewLiveTranscoder(cfg)
+	require.Equal(t, "h264_qsv", lt.EncoderName())
+	args := lt.buildFFmpegArgs()
+
+	// QSV decode uses the hwaccel form (system-memory nv12 frames), NOT the
+	// dedicated hevc_qsv decoder — hardware frames break the software scale.
+	require.NotContains(t, args, "hevc_qsv")
+	require.Contains(t, args, "-hwaccel")
+	require.Contains(t, args, "qsv")
+	require.Contains(t, args, "-hwaccel_output_format")
+	require.Contains(t, args, "nv12")
+	require.Contains(t, args, "-c:v")
+	require.Contains(t, args, "hevc")
+	require.Contains(t, args, "h264_qsv")
+	// QSV: valid preset tier, no -tune.
+	require.Contains(t, args, "-preset")
+	require.Contains(t, args, "veryfast")
+	require.NotContains(t, args, "-tune")
+	require.NotContains(t, args, "zerolatency")
+	// Scaling: plain software scale; frames are in system memory.
+	require.Contains(t, args, "-s")
+	require.Contains(t, args, "1280x720")
+	require.NotContains(t, args, "scale_qsv")
+	require.Contains(t, args, "-g")
+	require.Contains(t, args, "50")
+	require.Contains(t, args, "-b:v")
+	require.Contains(t, args, "4000k")
+	require.Contains(t, args, "-bufsize")
+	require.Contains(t, args, "8000k")
+	require.Contains(t, args, "-r")
+	require.Contains(t, args, "25")
+	require.Contains(t, args, "pipe:0")
+	require.Contains(t, args, "pipe:1")
 }
 
 // ---------------------------------------------------------------------------

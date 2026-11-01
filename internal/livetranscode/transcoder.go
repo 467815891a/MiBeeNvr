@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -169,9 +170,10 @@ func (lt *LiveTranscoder) resolveEncoders() (string, string, bool) {
 // and stdout pipes, starts the writer goroutine (inputQueue → stdin) and
 // reader goroutine (stdout → AnnexBStreamParser → outputCh).
 //
-// The FFmpeg command is:
+// The FFmpeg command is (low-latency flags vary by encoder family — see
+// buildFFmpegArgs):
 //
-//	[S|W decode] -i pipe:0 [HW|SW encode] -preset ultrafast -tune zerolatency
+//	[SW|HW decode] -i pipe:0 [SW|HW encode] -preset <family-specific>
 //	  -g <gop*fps> -keyint_min <same> -sc_threshold 0 -bf <n>
 //	  -b:v <kbps>k -maxrate <kbps>k -bufsize <2*kbps>k
 //	  -s <resolution> -r <fps> -f h264 pipe:1
@@ -191,12 +193,20 @@ func (lt *LiveTranscoder) Start(ctx context.Context) error {
 	lt.cmd = exec.CommandContext(ctx, ffmpegPath, args...)
 	procctl.SetProcessGroup(lt.cmd)
 
-	// Override default SIGKILL with SIGTERM for graceful shutdown
-	lt.cmd.Cancel = func() error {
-		if lt.cmd.Process != nil {
-			return lt.cmd.Process.Signal(syscall.SIGTERM)
+	if runtime.GOOS == "windows" {
+		// Windows: os.Process cannot deliver SIGTERM (only Kill). Keep the
+		// default context-cancel → Kill behavior; WaitDelay guarantees Wait
+		// returns and the stdio pipes close promptly after the kill instead of
+		// blocking on a child inheriting the pipe handles.
+		lt.cmd.WaitDelay = 3 * time.Second
+	} else {
+		// Override default SIGKILL with SIGTERM for graceful shutdown
+		lt.cmd.Cancel = func() error {
+			if lt.cmd.Process != nil {
+				return lt.cmd.Process.Signal(syscall.SIGTERM)
+			}
+			return nil
 		}
-		return nil
 	}
 
 	stdin, err := lt.cmd.StdinPipe()
@@ -375,30 +385,54 @@ func (lt *LiveTranscoder) PresetResolution() string {
 // ---------------------------------------------------------------------------
 
 // buildFFmpegArgs constructs the FFmpeg argument list for live transcoding.
+//
+// Option flags are encoder-family specific: -preset/-tune are encoder AVOptions,
+// not generic — "ultrafast"/"zerolatency" only exist for libx264, and passing
+// them to QSV/NVENC aborts FFmpeg at startup. QSV decodes through the hwaccel
+// form (-hwaccel qsv) rather than the dedicated hevc_qsv decoder, so frames
+// land in system memory and the plain software scale (-s) stays usable.
 func (lt *LiveTranscoder) buildFFmpegArgs() []string {
 	var args []string
 
 	// Input — raw bitstream via pipe
 	if lt.inputDecoder != "" {
-		// HW decoder
-		args = append(args, "-c:v", lt.inputDecoder)
+		if isQSVCodecName(lt.inputDecoder) {
+			// QSV hardware decode, hwaccel form: the GPU decodes and frames
+			// download to system memory (nv12). The dedicated hevc_qsv decoder
+			// instead emits hardware (QSV) frames that the auto-inserted
+			// software scaler cannot negotiate, and scale_qsv fails format
+			// negotiation in decoder-to-encoder graphs (verified against the
+			// gyan.dev ffmpeg 9 essentials build on Intel Arc).
+			base := strings.TrimSuffix(lt.inputDecoder, "_qsv")
+			args = append(args, "-f", base, "-hwaccel", "qsv",
+				"-hwaccel_output_format", "nv12", "-c:v", base)
+		} else {
+			// v4l2m2m keeps its historical flag set
+			args = append(args, "-c:v", lt.inputDecoder)
+		}
 	} else {
 		// SW decoder via format demuxer
-		switch lt.cfg.InputCodec {
-		case CodecH265:
-			args = append(args, "-f", "hevc")
-		default:
-			args = append(args, "-f", "hevc")
-		}
+		args = append(args, "-f", "hevc")
 	}
 	args = append(args, "-i", "pipe:0")
 
 	// Output encoder
 	args = append(args, "-c:v", lt.outputEncoder)
 
-	// Live encoding flags
-	args = append(args, "-preset", "ultrafast")
-	args = append(args, "-tune", "zerolatency")
+	// Live low-latency flags, per encoder family
+	switch {
+	case isQSVCodecName(lt.outputEncoder):
+		// QSV preset scale is veryfast..veryslow; veryfast is its fastest valid
+		// tier. No -tune option exists for QSV.
+		args = append(args, "-preset", "veryfast")
+	case strings.Contains(lt.outputEncoder, "nvenc"):
+		// NVENC: p1 = fastest preset, ll = low-latency tuning.
+		args = append(args, "-preset", "p1", "-tune", "ll")
+	default:
+		// libx264 and v4l2m2m keep the historical flags
+		args = append(args, "-preset", "ultrafast")
+		args = append(args, "-tune", "zerolatency")
+	}
 
 	// GOP control: force keyframe interval to GopSeconds
 	gop := lt.cfg.Preset.GopSeconds * lt.cfg.Preset.Framerate
@@ -415,7 +449,8 @@ func (lt *LiveTranscoder) buildFFmpegArgs() []string {
 	args = append(args, "-maxrate", fmt.Sprintf("%dk", bitrate))
 	args = append(args, "-bufsize", fmt.Sprintf("%dk", bitrate*2))
 
-	// Resolution
+	// Resolution — plain software scale; frames are always in system memory
+	// (SW decode, v4l2m2m, or QSV hwaccel with nv12 download).
 	if lt.cfg.Preset.Resolution != "" {
 		args = append(args, "-s", lt.cfg.Preset.Resolution)
 	}
@@ -428,6 +463,12 @@ func (lt *LiveTranscoder) buildFFmpegArgs() []string {
 	args = append(args, "pipe:1")
 
 	return args
+}
+
+// isQSVCodecName reports whether an encoder/decoder name is an Intel Quick Sync
+// codec (e.g. h264_qsv, hevc_qsv).
+func isQSVCodecName(name string) bool {
+	return strings.Contains(name, "_qsv")
 }
 
 // ---------------------------------------------------------------------------
