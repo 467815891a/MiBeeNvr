@@ -9,7 +9,7 @@
   import { showToast } from '$lib/toast.svelte';
   import { RefreshCw } from 'lucide-svelte';
   import type { Recording } from '$lib/api';
-  import { downloadRecording as apiDownloadRecording } from '$lib/api';
+  import { getRecordingDownloadUrl } from '$lib/api';
   import { formatDate, formatDuration, formatFileSize } from '$lib/format';
   import type { ManagerStatus, TranscodeTask } from '$lib/api/transcoding';
   import { enqueueTranscodeTask, getTranscodingStatus, getTranscodingTasks } from '$lib/api/transcoding';
@@ -37,20 +37,12 @@
   } = $props();
 
   // --- Download ---
-  let downloadProgress = $state(0);
-  let isDownloading = $state(false);
-
-  async function handleDownload() {
-    if (isDownloading) return;
-    isDownloading = true;
-    downloadProgress = 0;
-    try {
-      await apiDownloadRecording(recording.id, (loaded, total) => {
-        downloadProgress = Math.round((loaded / total) * 100);
-      });
-    } catch (e) { console.error('Download failed:', e); }
-    finally { isDownloading = false; downloadProgress = 0; }
-  }
+  //
+  // The download is a plain link, not a button that fetches the file first:
+  // building the recording into a Blob would put hundreds of megabytes into
+  // the renderer's heap and the tab died with "Out of Memory". The browser's
+  // own download UI shows the progress instead.
+  const downloadURL = $derived(getRecordingDownloadUrl(recording.id));
 
   // --- Transcoding status (self-contained poll) ---
   let transcodingStatus = $state<ManagerStatus | null>(null);
@@ -157,16 +149,9 @@
   <!-- Actions -->
   <div class="flex flex-wrap gap-3 border-t th-border pt-6">
     <div class="flex flex-wrap gap-3">
-      {#if isDownloading}
-        <button disabled class="btn btn-primary opacity-75 flex items-center gap-2">
-          <div class="spinner spinner-sm"></div>
-          {downloadProgress}%
-        </button>
-      {:else}
-        <button onclick={handleDownload} class="btn btn-primary">
-          {t('detail.download')}
-        </button>
-      {/if}
+      <a href={downloadURL} download class="btn btn-primary">
+        {t('detail.download')}
+      </a>
       {#if canMerge && !mergeState.inProgress}
         <button onclick={onstartmerge} class="btn btn-primary">
           {t('detail.mergeAndPlay')}

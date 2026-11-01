@@ -320,52 +320,23 @@ export function clearMergedCodecCache(recordingId?: string): void {
   }
 }
 
-export async function downloadRecording(
-  id: string,
-  onProgress?: (loaded: number, total: number) => void,
-): Promise<void> {
-  const url = `${API_BASE}/recordings/${id}/download`;
-
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', url);
-
-    const authHeader = getAuthHeader();
-    if (authHeader) {
-      xhr.setRequestHeader('Authorization', authHeader);
-    }
-
-    xhr.responseType = 'blob';
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(xhr.response);
-      } else {
-        reject(new Error(`HTTP ${xhr.status}`));
-      }
-    };
-
-    xhr.onerror = () => reject(new Error('Network error'));
-
-    if (onProgress) {
-      xhr.onprogress = (e) => {
-        if (e.lengthComputable) {
-          onProgress(e.loaded, e.total);
-        }
-      };
-    }
-
-    xhr.send();
-  });
-
-  const objectUrl = URL.createObjectURL(blob);
+// downloadRecording hands a recording to the browser's download manager.
+//
+// It must NOT build the file into a Blob first: that puts the whole recording
+// into the renderer's heap — several hundred megabytes for a 30-minute 1080p
+// segment — and the tab died with "Out of Memory" every time. A native
+// <a download> lets the browser stream the response straight to disk.
+//
+// The URL carries the session token as a query parameter (appendAuthToken),
+// because an <a> cannot send an Authorization header; the auth middleware
+// accepts ?token= on the same paths as the Bearer header.
+export async function downloadRecording(id: string): Promise<void> {
   const a = document.createElement('a');
-  a.href = objectUrl;
+  a.href = getRecordingDownloadUrl(id);
   a.download = `recording_${id}.mp4`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(objectUrl);
 }
 
 // --- Frames (MJPEG recordings) ---

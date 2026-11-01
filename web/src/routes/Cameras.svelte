@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { listCameras, deleteCamera, startCamera, stopCamera, updateCamera, xiaomiDevices, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap, listArchives, setArchiveRetention, deleteArchiveGroup, listArchiveRecordings, deleteArchiveRecording, getArchiveCleanupStatus, getHealthStatus, getTranscodingStatus, getTranscodingSettings, getTranscodingCheck, getCameraRecordingStats, apiRequestBlob, rediscoverCamera, activateCamera, appendAuthToken, ApiRequestError, API_BASE, listCameraGroups, createCameraGroup, renameCameraGroup, deleteCameraGroup, setCameraGroupsOrder } from '$lib/api';
+  import { listCameras, deleteCamera, startCamera, stopCamera, updateCamera, xiaomiDevices, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap, listArchives, setArchiveRetention, deleteArchiveGroup, listArchiveRecordings, deleteArchiveRecording, getArchiveCleanupStatus, getHealthStatus, getTranscodingStatus, getTranscodingSettings, getTranscodingCheck, getCameraRecordingStats, rediscoverCamera, activateCamera, appendAuthToken, ApiRequestError, API_BASE, listCameraGroups, createCameraGroup, renameCameraGroup, deleteCameraGroup, setCameraGroupsOrder } from '$lib/api';
   import type { Camera, XiaomiDevice, ProtocolInfo, ArchiveGroup, Recording, CameraHealth, HealthStatusResponse, ArchiveCleanupTask, ArchiveCleanupStatus } from '$lib/api';
   import { t } from '$lib/i18n';
   import { showToast } from '$lib/toast.svelte';
@@ -459,20 +459,18 @@
   }
 
   async function downloadRecording(rec: Recording) {
-    // apiRequestBlob carries the session auth (and its renewal/gateway
-    // handling) instead of a hand-rolled fetch that lost both.
+    // A native <a download> streams the file straight to disk. Building a Blob
+    // first would put the whole recording into the renderer's heap, and the
+    // tab died with "Out of Memory" on the bigger ones.
     try {
-      const blob = await apiRequestBlob(
-        `/archives/${expandedArchiveId}/recordings/${rec.id}/download`
-      );
-      const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = objectUrl;
+      link.href = appendAuthToken(
+        `${API_BASE}/archives/${expandedArchiveId}/recordings/${rec.id}/download`,
+      );
       link.download = `archive_${rec.camera_id}_${rec.id}.mp4`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      URL.revokeObjectURL(objectUrl);
     } catch {
       showToast(t('common.error'), 'error');
     }
