@@ -119,6 +119,48 @@
       `${label}_${stamp}`,
     );
   });
+  // Range export probe state. A bare <a download> turns the server's 404
+  // into a red entry in the browser's download shelf with no feedback on the
+  // page — the user only learns about it after the fact. Probing first keeps
+  // the "no footage in this window" case on the page.
+  let rangeDownloadBusy = $state(false);
+  let rangeDownloadError = $state('');
+
+  async function handleRangeDownload(e: MouseEvent) {
+    if (!rangeDownloadURL || rangeDownloadBusy) return;
+    e.preventDefault();
+    rangeDownloadBusy = true;
+    rangeDownloadError = '';
+    try {
+      // HEAD only: the server answers it with the very same headers as the
+      // GET without running FFmpeg, so the check costs nothing even for a
+      // multi-hundred-megabyte range.
+      const res = await fetch(rangeDownloadURL, { method: 'HEAD' });
+      if (!res.ok) {
+        rangeDownloadError = res.status === 404
+          ? t('detail.downloadRangeNoRecordings')
+          : t('detail.downloadRangeFailed', { status: res.status });
+        showToast(rangeDownloadError, 'error');
+        return;
+      }
+      // Hand the file to the browser as a native download. Fetching the body
+      // into a Blob instead would buffer hundreds of megabytes in the tab's
+      // renderer — that is what made the range download die with "Out of
+      // Memory".
+      const a = document.createElement('a');
+      a.href = rangeDownloadURL;
+      a.download = '';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch {
+      rangeDownloadError = t('detail.downloadRangeFailed', { status: 'network' });
+      showToast(rangeDownloadError, 'error');
+    } finally {
+      rangeDownloadBusy = false;
+    }
+  }
   const mergeDownloadUrl = $derived(
     dayMerge?.status === 'completed' && dayMerge.output_path ? getTimelapseMergeDownloadUrl(dayMerge.id) : '',
   );
@@ -709,10 +751,15 @@
                     class="btn btn-sm btn-primary flex items-center gap-1"
                     href={rangeDownloadURL}
                     download
+                    onclick={handleRangeDownload}
+                    aria-busy={rangeDownloadBusy}
                   >
                     <Download size={14} />
                     {t('detail.downloadRange')}
                   </a>
+                  {#if rangeDownloadError}
+                    <span class="text-xs text-red-500">{rangeDownloadError}</span>
+                  {/if}
                 {:else}
                   <button
                     type="button"

@@ -197,6 +197,8 @@
   "cameras.uvcModesFailed": "Failed to query the capture modes of the device",
   "detail.downloadRange": "Download this segment",
   "detail.downloadRangeInvalid": "End time must be after start time",
+  "detail.downloadRangeNoRecordings": "There is no footage in the selected time range — please pick another one.",
+  "detail.downloadRangeFailed": "Download failed (error {status}) — please try again.",
   "detail.downloadStart": "Start time",
   "detail.downloadEnd": "End time",
   "cameras.failedAdd": "Failed to add camera",

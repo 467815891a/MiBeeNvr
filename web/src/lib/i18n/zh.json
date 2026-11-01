@@ -197,6 +197,8 @@
   "cameras.uvcModesFailed": "无法获取设备的采集模式",
   "detail.downloadRange": "下载此时段",
   "detail.downloadRangeInvalid": "结束时间必须晚于开始时间",
+  "detail.downloadRangeNoRecordings": "所选时间段没有录像，请换一个时间段再试。",
+  "detail.downloadRangeFailed": "下载失败（错误码 {status}），请稍后重试。",
   "detail.downloadStart": "开始时间",
   "detail.downloadEnd": "结束时间",
   "cameras.failedAdd": "添加摄像头失败",

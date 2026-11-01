@@ -2308,6 +2308,8 @@
   "cameras.uvcModesFailed": "Не удалось получить режимы захвата устройства",
   "detail.downloadRange": "Скачать этот сегмент",
   "detail.downloadRangeInvalid": "Время окончания должно быть позже времени начала",
+  "detail.downloadRangeNoRecordings": "В выбранном промежутке нет записей — выберите другой.",
+  "detail.downloadRangeFailed": "Не удалось скачать (ошибка {status}) — попробуйте позже.",
   "detail.downloadStart": "Начальное время",
   "detail.downloadEnd": "Конечное время"
 }
