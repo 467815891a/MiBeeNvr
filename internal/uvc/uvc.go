@@ -74,3 +74,30 @@ var (
 	// requested camera control (e.g. pan/tilt on a fixed webcam).
 	ErrAxisUnsupported = errors.New("uvc: camera control not supported by device")
 )
+
+// BestMode picks the highest-resolution mode a device advertises, breaking
+// ties by frame rate. ok is false when the device reported no usable mode.
+//
+// The capturer needs this: when no size is requested, DirectShow opens the
+// pin on the device's DEFAULT format, and that default is routinely the
+// lowest one (640x480) even on cameras that can deliver far more — the
+// symptom is a permanently soft image no matter how good the sensor is.
+func BestMode(modes []Mode) (Mode, bool) {
+	var best Mode
+	found := false
+	for _, m := range modes {
+		if m.Width <= 0 || m.Height <= 0 {
+			continue
+		}
+		if !found {
+			best, found = m, true
+			continue
+		}
+		bestPx := best.Width * best.Height
+		modePx := m.Width * m.Height
+		if modePx > bestPx || (modePx == bestPx && m.FPS > best.FPS) {
+			best = m
+		}
+	}
+	return best, found
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -89,6 +90,12 @@ type UVCRecorder struct {
 	lastErr   error
 	audioErr  error
 	wg        sync.WaitGroup
+
+	// modeCache holds the device's best advertised capture mode (nil until
+	// the first successful enumeration). The mode list cannot change while
+	// the device stays plugged in, and enumerating it spawns an ffmpeg
+	// process, so the result is reused across reconnects.
+	modeCache *uvc.Mode
 }
 
 var _ model.Recorder = (*UVCRecorder)(nil)
@@ -236,6 +243,86 @@ func (r *UVCRecorder) captureLoop(ctx context.Context) {
 	}
 }
 
+// captureFormat is the resolution/frame rate the capture actually runs at.
+// It can differ from the configured values: when the camera configuration
+// leaves the size unset, the device's best advertised mode is used instead
+// of the device default (see resolveCaptureFormat).
+type captureFormat struct {
+	Width  int
+	Height int
+	FPS    int
+	// Codec is the pin format the mode was advertised with ("" = unknown).
+	// Uncompressed pins (yuyv422) need several times the USB bandwidth of
+	// mjpeg at the same resolution — the rate log reports the difference.
+	Codec string
+	// Auto is true when the format came from the device's mode list rather
+	// than from the camera configuration.
+	Auto bool
+}
+
+// String renders the capture format for the logs ("1920x1080@30", or
+// "device default" when the size was left to the driver).
+func (f captureFormat) String() string {
+	if f.Width <= 0 || f.Height <= 0 {
+		return "device default"
+	}
+	return fmt.Sprintf("%dx%d@%d", f.Width, f.Height, f.FPS)
+}
+
+// resolveCaptureFormat decides at which resolution the capture runs.
+//
+// An unset width/height means "whatever the device defaults to" — and
+// DirectShow's default is routinely the LOWEST format the camera supports
+// (640x480), even on devices that advertise 1080p or 4K. The result is a
+// permanently soft picture that no camera setting can fix. So ask the device
+// what it offers and take its best mode.
+//
+// The mode list is cached: it cannot change while the device stays plugged
+// in, and enumerating it spawns an ffmpeg process (only the mode query —
+// no capture).
+func (r *UVCRecorder) resolveCaptureFormat(ffmpegPath, name string) captureFormat {
+	format := captureFormat{Width: r.cfg.Width, Height: r.cfg.Height, FPS: r.cfg.FPS}
+	if format.Width > 0 && format.Height > 0 {
+		return format
+	}
+
+	r.mu.Lock()
+	cached := r.modeCache
+	r.mu.Unlock()
+	hasCached := cached != nil
+
+	if !hasCached {
+		modes, err := uvc.ListDeviceModes(ffmpegPath, name)
+		switch {
+		case err != nil && !errors.Is(err, uvc.ErrUnsupportedPlatform):
+			uvcLogger.Warn("uvc: capture mode enumeration failed, using the device default format",
+				"camera_id", r.cfg.CameraID, "error", err)
+		case err == nil:
+			if mode, ok := uvc.BestMode(modes); ok {
+				cached = &mode
+				r.mu.Lock()
+				r.modeCache = cached
+				r.mu.Unlock()
+			}
+		}
+	}
+
+	if cached == nil {
+		return format
+	}
+	format.Width, format.Height = cached.Width, cached.Height
+	format.Codec = cached.Codec
+	format.Auto = true
+	if format.FPS <= 0 {
+		format.FPS = int(math.Round(cached.FPS))
+	}
+	uvcLogger.Info("uvc: using the device's best capture mode",
+		"camera_id", r.cfg.CameraID,
+		"mode", fmt.Sprintf("%dx%d@%g", cached.Width, cached.Height, cached.FPS),
+		"pin_codec", cached.Codec)
+	return format
+}
+
 // captureOnce runs one FFmpeg capture attempt until the process exits or the
 // context is cancelled. The input side first tries forcing an MJPEG capture
 // pin (the pragmatic default for USB cameras — YUY2 at high resolutions
@@ -256,12 +343,14 @@ func (r *UVCRecorder) captureOnce(ctx context.Context) error {
 		return fmt.Errorf("resolve device: %w", err)
 	}
 
+	format := r.resolveCaptureFormat(ffmpegPath, name)
+
 	var lastErr error
 	for attempt, forceMJPEG := range []bool{true, false} {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		err := r.runFFmpeg(ctx, ffmpegPath, name, deviceNumber, forceMJPEG)
+		err := r.runFFmpeg(ctx, ffmpegPath, name, deviceNumber, forceMJPEG, format)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -327,8 +416,8 @@ func buildFFmpegArgs(name string, deviceNumber int, forceMJPEG bool, width, heig
 // runFFmpeg spawns one FFmpeg process and pumps stdout through the Annex-B
 // parser into the inner ingest recorder. Returns when the process exits or
 // ctx is cancelled. err is nil for clean EOF, non-nil otherwise.
-func (r *UVCRecorder) runFFmpeg(ctx context.Context, ffmpegPath, name string, deviceNumber int, forceMJPEG bool) error {
-	args := buildFFmpegArgs(name, deviceNumber, forceMJPEG, r.cfg.Width, r.cfg.Height, r.cfg.FPS, r.cfg.Encoder)
+func (r *UVCRecorder) runFFmpeg(ctx context.Context, ffmpegPath, name string, deviceNumber int, forceMJPEG bool, format captureFormat) error {
+	args := buildFFmpegArgs(name, deviceNumber, forceMJPEG, format.Width, format.Height, format.FPS, r.cfg.Encoder)
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	cmd.Stderr = nil // captured below via a pipe
 
@@ -355,7 +444,8 @@ func (r *UVCRecorder) runFFmpeg(ctx context.Context, ffmpegPath, name string, de
 
 	uvcLogger.Info("uvc ffmpeg capture started",
 		"camera_id", r.cfg.CameraID, "device", name, "device_number", deviceNumber,
-		"force_mjpeg", forceMJPEG, "encoder", orDefault(r.cfg.Encoder, "libx264"))
+		"force_mjpeg", forceMJPEG, "encoder", orDefault(r.cfg.Encoder, "libx264"),
+		"format", format.String(), "pin_codec", format.Codec, "auto_mode", format.Auto)
 
 	// Drain stderr into a bounded tail so failures carry the driver's error
 	// message (dshow reports device-busy/missing-pin reasons here).
@@ -368,7 +458,7 @@ func (r *UVCRecorder) runFFmpeg(ctx context.Context, ffmpegPath, name string, de
 
 	parser := livetranscode.NewAnnexBStreamParser(livetranscode.CodecH264)
 	gotFrames := false
-	readErr := r.pumpAnnexB(ctx, stdout, parser, func() {
+	readErr := r.pumpAnnexB(ctx, stdout, parser, format, func() {
 		if !gotFrames {
 			gotFrames = true
 			uvcLogger.Info("uvc frames flowing", "camera_id", r.cfg.CameraID)
@@ -413,25 +503,41 @@ func (r *UVCRecorder) runFFmpeg(ctx context.Context, ffmpegPath, name string, de
 // stts ended up with 1 ms and 280 ms sample durations, and the live HLS part
 // durations wobbled around the 1.5 s target. A regular 1/fps clock is what
 // the audio pump already uses (pumpAudioADTS).
-func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *livetranscode.AnnexBStreamParser, onFirstFrame func()) error {
+func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *livetranscode.AnnexBStreamParser, format captureFormat, onFirstFrame func()) error {
 	buf := make([]byte, 64*1024)
 	// Base the clock on the recorder epoch so the timeline stays monotonic
 	// across an ffmpeg restart (a reconnect must not hand consumers a
 	// backwards DTS).
 	baseTicks := time.Since(r.epoch).Nanoseconds() * 90000 / int64(time.Second)
 	ticksPerFrame := int64(0)
-	if fps := r.cfg.FPS; fps > 0 {
+	if fps := format.FPS; fps > 0 {
 		ticksPerFrame = 90000 / int64(fps)
 		if ticksPerFrame < 1 {
 			ticksPerFrame = 1
 		}
 	}
+
+	// USB link rate diagnostics. The USB bus is the usual bottleneck of a
+	// UVC camera: an uncompressed 1080p30 pin already needs ~1 Gbit/s, which
+	// a USB 2.0 link cannot carry, and the symptom is a silently reduced
+	// frame rate rather than an error. Sampling the delivered rate makes a
+	// starved link visible in the log instead of only as a soft picture.
+	var (
+		rateFrames  int64
+		rateBytes   int64
+		windowStart = time.Now()
+		windowFrame int64
+		windowByte  int64
+	)
 	var frameIndex int64
+
 	emit := func(au livetranscode.AccessUnit) {
 		if len(au) == 0 {
 			return
 		}
 		onFirstFrame()
+		rateFrames++
+		windowFrame++
 		var ptsTicks int64
 		if ticksPerFrame > 0 {
 			ptsTicks = baseTicks + frameIndex*ticksPerFrame
@@ -442,15 +548,53 @@ func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *
 		frameIndex++
 		r.IngestRecorder.WriteNALU(au, ptsTicks, false)
 	}
+
+	reportRate := func() {
+		elapsed := time.Since(windowStart)
+		if elapsed < uvcRateLogInterval {
+			return
+		}
+		windowStart = time.Now()
+		fps := float64(windowFrame) / elapsed.Seconds()
+		mbps := float64(windowByte) * 8 / elapsed.Seconds() / 1e6
+		attrs := []any{
+			"camera_id", r.cfg.CameraID,
+			"format", format.String(),
+			"pin_codec", format.Codec,
+			"fps", math.Round(fps*10) / 10,
+			"target_fps", format.FPS,
+			"stream_mbps", math.Round(mbps*100) / 100,
+			"frames", windowFrame,
+			"total_frames", rateFrames,
+			"total_bytes", rateBytes,
+		}
+		if need, ok := usbBandwidthNeedMbps(format); ok {
+			attrs = append(attrs, "usb_need_mbps", math.Round(need*100) / 100)
+		} else {
+			// A compressed pin's USB traffic cannot be derived from the
+			// encoded stream — the measured frame rate is the reference.
+			attrs = append(attrs, "usb_need_mbps", "unknown (compressed pin)")
+		}
+		if format.FPS > 0 && fps > 0 && fps < float64(format.FPS)*0.9 {
+			uvcLogger.Warn("uvc capture rate below target — the USB link may not keep up",
+				append(attrs, "reason", "dropped frames")...)
+			return
+		}
+		uvcLogger.Info("uvc capture rate", attrs...)
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		n, readErr := stdout.Read(buf)
 		if n > 0 {
+			rateBytes += int64(n)
+			windowByte += int64(n)
 			for _, au := range parser.Feed(buf[:n]) {
 				emit(au)
 			}
+			reportRate()
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
@@ -463,6 +607,33 @@ func (r *UVCRecorder) pumpAnnexB(ctx context.Context, stdout io.Reader, parser *
 			return readErr
 		}
 	}
+}
+
+// uvcRateLogInterval is how often the delivered capture rate is logged.
+const uvcRateLogInterval = 10 * time.Second
+
+// usbBandwidthNeedMbps estimates the raw USB traffic the capture pin demands
+// per second. Uncompressed pins are exact (YUYV422 carries 2 bytes per
+// pixel), which is what makes a 1080p30 pin unusable on USB 2.0. Compressed
+// pins (mjpeg, h264) have no fixed rate — ok is false for them.
+func usbBandwidthNeedMbps(f captureFormat) (float64, bool) {
+	if f.Width <= 0 || f.Height <= 0 || f.FPS <= 0 {
+		return 0, false
+	}
+	bytesPerPixel := 0.0
+	switch strings.ToLower(f.Codec) {
+	case "yuyv422", "yuyv", "yuy2":
+		bytesPerPixel = 2
+	case "uyvy":
+		bytesPerPixel = 2
+	case "rgb24", "bgr24":
+		bytesPerPixel = 3
+	case "gray":
+		bytesPerPixel = 1
+	default:
+		return 0, false
+	}
+	return float64(f.Width) * float64(f.Height) * bytesPerPixel * float64(f.FPS) * 8 / 1e6, true
 }
 
 func orDefault(v, def string) string {
