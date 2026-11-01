@@ -281,6 +281,18 @@ export function getCameraPlaybackPlaylistURL(cameraId: string, startISO: string,
   return appendAuthToken(`${API_BASE}/cameras/${cameraId}/playback/playlist.m3u8?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`);
 }
 
+// getCameraRangeDownloadURL builds a download URL that streams a single MP4
+// covering [start, end] for the camera. The server picks the recordings that
+// OVERLAP the window (not the ones that start inside it) and trims each one
+// to the part that falls inside it, so the window takes effect even when it
+// sits inside a 30-minute recording. The codec is copied, not re-encoded.
+// Open in a new tab or set as <a href> to trigger the browser download.
+export function getCameraRangeDownloadURL(cameraId: string, startISO: string, endISO: string, name?: string): string {
+  let u = `${API_BASE}/cameras/${cameraId}/download-range?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`;
+  if (name) u += `&name=${encodeURIComponent(name)}`;
+  return appendAuthToken(u);
+}
+
 // probeMergedRecordingCodec issues a HEAD request to the /merged endpoint and
 // returns the X-Timelapse-Codec header value ('h264' / 'h265' / 'mjpeg') so the
 // frontend can pick the right playback path: <video> for H.264/H.265 (browser-

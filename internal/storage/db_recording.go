@@ -253,6 +253,60 @@ func (d *DB) GetRecordingsByIDBatch(ctx context.Context, ids []string) ([]model.
 	return res, nil
 }
 
+// ListRecordingsOverlapping returns the camera's video recordings whose time
+// span intersects the window [start, end], oldest first.
+//
+// ListRecordings' StartTime/EndTime filter matches on started_at: a recording
+// is returned only when it BEGINS inside the window. That is the wrong
+// semantics for "download the footage between T1 and T2" — the window usually
+// sits INSIDE a long recording (segments are 30 minutes wide), so a
+// started_at filter finds nothing and the request comes back empty. This
+// method matches on OVERLAP instead.
+//
+// Recordings still being written (ended_at empty/NULL) are treated as running
+// until `end`, so a window that reaches into a live recording still matches.
+func (d *DB) ListRecordingsOverlapping(ctx context.Context, cameraID string, start, end time.Time, formats []model.Format, limit int) ([]model.Recording, error) {
+	defer d.observeQuery("ListRecordingsOverlapping", time.Now())
+	if limit <= 0 {
+		limit = 200
+	}
+	where := []string{
+		"camera_id=?",
+		"COALESCE(layer,0)=0",
+		"archived=0",
+		// Started before the window ends …
+		"started_at<=?",
+		// … and not finished before the window starts.
+		"(ended_at IS NULL OR ended_at='' OR ended_at>=?)",
+	}
+	args := []any{cameraID, formatTime(end), formatTime(start)}
+	if len(formats) > 0 {
+		placeholders := make([]string, len(formats))
+		for i, f := range formats {
+			placeholders[i] = "?"
+			args = append(args, string(f))
+		}
+		where = append(where, "format IN ("+strings.Join(placeholders, ",")+")")
+	}
+	sqlstr := selectRecordingColumns + " WHERE " + strings.Join(where, " AND ") +
+		" ORDER BY started_at ASC LIMIT ?"
+	args = append(args, limit)
+	rows, err := d.readConn().QueryContext(ctx, sqlstr, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list recordings overlapping: %w", err)
+	}
+	defer rows.Close()
+	res := make([]model.Recording, 0)
+	for rows.Next() {
+		r, err := scanRecordingRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list recordings overlapping: %w", err)
+		}
+		res = append(res, *r)
+	}
+	return res, rows.Err()
+}
+
 func (d *DB) ListRecordings(ctx context.Context, filter model.RecordingFilter) ([]model.Recording, error) {
 	defer d.observeQuery("ListRecordings", time.Now())
 	where, args := recordingsFilterWhere(filter)

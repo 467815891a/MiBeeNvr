@@ -224,5 +224,75 @@ func (m *Manager) GetInfo(rec model.Recording) (*merge.SegmentInfo, error) {
 	return m.cache.Get(rec)
 }
 
+// KeyframeAnchor returns the media time (in seconds) of the last keyframe at
+// or before offsetSec into the recording, and whether such an anchor exists.
+//
+// Cutting a stream copy can only BEGIN on a keyframe: the first frames of the
+// output must be independently decodable, otherwise the player shows gray
+// until the next IDR (#488). Anchoring the cut on the keyframe at or before
+// the requested start keeps the file playable and bounds the extra material
+// to one GOP — instead of the whole recording.
+//
+// The sync-sample table marks every keyframe, so the sample table gives the
+// exact anchor. Files without an stss box fall back to the fragment plan:
+// its fragment starts are keyframes too, just further apart.
+func (m *Manager) KeyframeAnchor(rec model.Recording, offsetSec float64) (float64, bool) {
+	if offsetSec < 0 {
+		offsetSec = 0
+	}
+	info, err := m.GetInfo(rec)
+	if err != nil {
+		return 0, false
+	}
+	if info.KeyframesFromStss {
+		return keyframeTimeAtOrBefore(info, offsetSec)
+	}
+	frags, ts, err := m.Fragments(rec)
+	if err != nil || ts == 0 || len(frags) == 0 {
+		return 0, false
+	}
+	target := uint64(offsetSec * float64(ts))
+	var anchor uint64
+	found := false
+	for _, f := range frags {
+		if f.StartUnits > target {
+			break
+		}
+		anchor = f.StartUnits
+		found = true
+	}
+	if !found {
+		return 0, false
+	}
+	return float64(anchor) / float64(ts), true
+}
+
+// keyframeTimeAtOrBefore scans the sample table for the last keyframe that
+// starts at or before offsetSec into the recording. The table is walked once
+// per call and the parsed result is cached per recording.
+func keyframeTimeAtOrBefore(info *merge.SegmentInfo, offsetSec float64) (float64, bool) {
+	if info == nil || info.Timescale == 0 || len(info.Samples) == 0 {
+		return 0, false
+	}
+	target := uint64(offsetSec * float64(info.Timescale))
+	var elapsed uint64
+	var anchor uint64
+	found := false
+	for _, s := range info.Samples {
+		if s.IsKeyFrame {
+			if elapsed > target {
+				break
+			}
+			anchor = elapsed
+			found = true
+		}
+		elapsed += uint64(s.Duration)
+	}
+	if !found {
+		return 0, false
+	}
+	return float64(anchor) / float64(info.Timescale), true
+}
+
 // TargetSec returns the fragment target duration in seconds.
 func (m *Manager) TargetSec() float64 { return m.targetSec }

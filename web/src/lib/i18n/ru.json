@@ -2304,4 +2304,8 @@
   "cameras.uvcAudioHint": "Выберите микрофон и отметьте «Запись звука» для записи аудио вместе с видео (AAC в общем конвейере).",
   "cameras.uvcDevicesFailed": "Не удалось получить список USB-устройств",
   "cameras.uvcModesFailed": "Не удалось получить режимы захвата устройства",
+  "detail.downloadRange": "Скачать этот сегмент",
+  "detail.downloadRangeInvalid": "Время окончания должно быть позже времени начала",
+  "detail.downloadStart": "Начальное время",
+  "detail.downloadEnd": "Конечное время"
 }

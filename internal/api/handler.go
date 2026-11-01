@@ -525,6 +525,7 @@ func (h *Handler) registerMediaRoutes(r chi.Router) {
 	r.Head("/api/timelapse/merges/{id}/download", h.handleDownloadTimelapseMerge)
 	r.Get("/api/cameras/{cameraID}/playback/playlist.m3u8", h.handlePlaybackPlaylist)
 	r.Get("/api/cameras/{cameraID}/playback/{recordingID}/{segName}", h.handlePlaybackSegment)
+	r.Get("/api/cameras/{cameraID}/download-range", h.handleDownloadRange)
 	r.Get("/api/offload/objects/{id}", h.handleOffloadObject)
 	r.Head("/api/offload/objects/{id}", h.handleOffloadObject)
 }

@@ -273,12 +273,70 @@ func TestIncludeAudio(t *testing.T) {
 	require.True(t, IncludeAudio(&merge.SegmentInfo{HasAudio: true, AudioCodec: "opus"}))
 }
 
+// findBoxAt locates a box by its container path, e.g.
+// {"moov","trak","mdia","minf","stbl","stss"}. It returns the box's byte
+// range plus the offsets of every ancestor box header (whose size field has
+// to shrink when the box is removed).
+func findBoxAt(data []byte, path []string) (int64, int64, []int64, bool) {
+	return findIn(data, 0, int64(len(data)), path, nil)
+}
+
+func findIn(data []byte, start, end int64, path []string, ancestors []int64) (int64, int64, []int64, bool) {
+	for off := start; off+8 <= end; {
+		size := int64(binary.BigEndian.Uint32(data[off : off+4]))
+		typ := string(data[off+4 : off+8])
+		hdr := int64(8)
+		if size == 1 {
+			size = int64(binary.BigEndian.Uint64(data[off+8 : off+16]))
+			hdr = 16
+		}
+		if size < hdr || off+size > end {
+			return 0, 0, nil, false
+		}
+		if typ == path[0] {
+			if len(path) == 1 {
+				return off, size, ancestors, true
+			}
+			return findIn(data, off+hdr, off+size, path[1:], append(ancestors, off))
+		}
+		off += size
+	}
+	return 0, 0, nil, false
+}
+
+// stripSyncTable removes the stss (sync sample) box from an MP4 in place,
+// producing a legacy-style file that has no sync-sample table.
+//
+// Recordings written before the muxer gained stss support look exactly like
+// that, and the VOD layer still has to serve them through the byte-probing
+// keyframe oracle instead of the table.
+func stripSyncTable(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	off, size, ancestors, ok := findBoxAt(raw, []string{"moov", "trak", "mdia", "minf", "stbl", "stss"})
+	require.True(t, ok, "fixture must contain a sync sample table")
+
+	out := make([]byte, 0, len(raw)-int(size))
+	out = append(out, raw[:off]...)
+	out = append(out, raw[off+size:]...)
+	// Every ancestor box shrinks by the removed child. The ancestors all
+	// start before the removed box, so their offsets stay valid.
+	for _, a := range ancestors {
+		cur := int64(binary.BigEndian.Uint32(out[a : a+4]))
+		binary.BigEndian.PutUint32(out[a:a+4], uint32(cur-size))
+	}
+	require.NoError(t, os.WriteFile(path, out, 0o644))
+}
+
 // TestProbeOracle_GOPPrediction exercises the stss-less path: the oracle must
 // find the first boundary with a linear scan, learn the GOP period, and then
 // land EXACTLY on keyframe positions via prediction (fixture: IDR every 50).
 func TestProbeOracle_GOPPrediction(t *testing.T) {
 	dir := t.TempDir()
 	path := buildTestMP4(t, dir, "seg.mp4", 500, 50)
+	stripSyncTable(t, path)
 	info, err := merge.ParseSegmentNoProbe(path)
 	require.NoError(t, err)
 	require.False(t, info.KeyframesFromStss)

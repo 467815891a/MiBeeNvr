@@ -12,6 +12,7 @@
   import { t } from '$lib/i18n';
   import { showToast } from '$lib/toast.svelte';
   import type { Recording, TimelapseMerge } from '$lib/api';
+  import { getCameraRangeDownloadURL } from '$lib/api';
   import {
     getRecording,
     deleteRecording,
@@ -79,9 +80,62 @@
   let cameraName = $state('');
   let mergeDeleteConfirm = $state(false);
   let mergeDeleting = $state(false);
+  // Range download dialog
+  let showRangeDownload = $state(false);
+  let dlStart = $state('');
+  let dlEnd = $state('');
+  $effect(() => {
+    if (showRangeDownload && recording) {
+      // Prefill with the recording's time range (local datetime-local format).
+      // Seconds are included: the recording boundaries carry them, and a
+      // minute-granular prefill would silently shift the requested window.
+      const toLocal = (iso: string) => {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return '';
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      };
+      dlStart = toLocal(recording.started_at || '');
+      dlEnd = toLocal(recording.ended_at || '');
+    }
+  });
+
+  // Range export link. Empty when the window is unusable — the server trims the
+  // recording files to exactly this window, so an inverted or unparsable
+  // range must not be sent (it would download the wrong footage).
+  const rangeDownloadURL = $derived.by(() => {
+    if (!recording || !dlStart || !dlEnd) return '';
+    const s = new Date(dlStart);
+    const e = new Date(dlEnd);
+    if (isNaN(s.getTime()) || isNaN(e.getTime()) || e <= s) return '';
+    // Filename: camera name when known, camera id otherwise. Path-hostile
+    // characters are replaced (the server sanitizes them again).
+    const label = (cameraName || recording.camera_id).replace(/[\\/:*?"<>|]/g, '_');
+    const stamp = dlStart.replace(/[:T]/g, '-');
+    return getCameraRangeDownloadURL(
+      recording.camera_id,
+      s.toISOString(),
+      e.toISOString(),
+      `${label}_${stamp}`,
+    );
+  });
   const mergeDownloadUrl = $derived(
     dayMerge?.status === 'completed' && dayMerge.output_path ? getTimelapseMergeDownloadUrl(dayMerge.id) : '',
   );
+
+  // Camera display name, used for the range-export filename. Cached per
+  // camera so segment switches do not re-fetch it.
+  let cameraNameFor = $state('');
+  async function loadCameraName(cameraId: string) {
+    if (!cameraId || cameraNameFor === cameraId) return;
+    cameraNameFor = cameraId;
+    try {
+      const cam = await getCamera(cameraId);
+      cameraName = cam?.name || '';
+    } catch {
+      cameraName = '';
+    }
+  }
 
   // Entry via #/timelapse-merge/{id}: load the merge, then best-effort load
   // its anchor recording (first row inside the window) so the toggle + day
@@ -100,12 +154,7 @@
       }
       dayMerge = m;
       tlMode = true;
-      try {
-        const cam = await getCamera(m.camera_id);
-        cameraName = cam?.name || '';
-      } catch {
-        cameraName = '';
-      }
+      await loadCameraName(m.camera_id);
       try {
         const resp = await listRecordings({
           camera_id: m.camera_id,
@@ -259,6 +308,7 @@
       const rec = await getRecording(currentId);
       if (token !== loadToken) return;
       recording = rec;
+      void loadCameraName(rec.camera_id);
       syncDetailDateInURL();
       // Dual-mode entry: the day's merge (if any) enables the toggle.
       void loadDayMerge();
@@ -632,7 +682,51 @@
                 <span class="hidden sm:inline">{t('library.nextDay')}</span>
                 <ChevronRight size={14} />
               </button>
+              {#if recording && recording.started_at && recording.ended_at}
+                <button
+                  type="button"
+                  class="btn btn-sm btn-ghost flex items-center gap-1 ml-1"
+                  onclick={() => showRangeDownload = !showRangeDownload}
+                  title={t('detail.downloadRange')}
+                >
+                  <Download size={14} />
+                  <span class="hidden sm:inline">{t('detail.downloadRange')}</span>
+                </button>
+              {/if}
             </div>
+            {#if showRangeDownload && recording}
+              <div class="card border th-border p-3 mt-2 flex flex-wrap items-end gap-3">
+                <div>
+                  <label class="input-label text-xs" for="dl-start">{t('detail.downloadStart')}</label>
+                  <input id="dl-start" type="datetime-local" step="1" class="input text-xs" bind:value={dlStart} />
+                </div>
+                <div>
+                  <label class="input-label text-xs" for="dl-end">{t('detail.downloadEnd')}</label>
+                  <input id="dl-end" type="datetime-local" step="1" class="input text-xs" bind:value={dlEnd} />
+                </div>
+                {#if rangeDownloadURL}
+                  <a
+                    class="btn btn-sm btn-primary flex items-center gap-1"
+                    href={rangeDownloadURL}
+                    download
+                  >
+                    <Download size={14} />
+                    {t('detail.downloadRange')}
+                  </a>
+                {:else}
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-primary flex items-center gap-1"
+                    disabled
+                    title={t('detail.downloadRangeInvalid')}
+                  >
+                    <Download size={14} />
+                    {t('detail.downloadRange')}
+                  </button>
+                  <span class="text-xs th-text-muted">{t('detail.downloadRangeInvalid')}</span>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/if}
 
