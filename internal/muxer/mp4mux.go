@@ -18,7 +18,14 @@ import (
 )
 
 // defaultTimescale is the timescale used for MP4 timestamps (ticks per second).
-const defaultTimescale = 1000
+//
+// 90 kHz is the MPEG-TS clock and divides every frame rate we record
+// exactly: 1/30 s = 3000 ticks, 1/25 s = 3600, 1/60 s = 1500. The previous
+// 1 kHz (milliseconds) truncated every sample duration — a 33.333 ms frame
+// became 33 ms — so the video track ran ~1 % fast and drifted away from the
+// audio track (whose 23.22 ms AAC frames were truncated the same way) over a
+// 30-minute segment.
+const defaultTimescale = 90000
 
 // ErrClosed is returned by every operation on a muxer whose Close has already
 // run. Sentinel so callers (recorder teardown paths racing a rotation) can
@@ -43,6 +50,9 @@ type track struct {
 	width       int
 	height      int
 	samples     []sample
+	// syncSamples holds the 1-based sample numbers that are random access
+	// points. It becomes the file's stss (sync sample) table.
+	syncSamples []uint32
 }
 
 // sample is one media sample's FILE placement record. The media bytes
@@ -247,6 +257,44 @@ func (m *MP4Muxer) WriteSample(trackID int, data []byte, pts time.Duration, dura
 	return m.appendSample(t, data, duration)
 }
 
+// WriteSampleMulti writes a picture that spans several NAL units (a
+// multi-slice picture) as ONE sample. Every NAL unit keeps its own 4-byte
+// length prefix inside the sample — the AVCC layout MP4 expects.
+//
+// Writing only the first slice of a multi-slice picture silently drops the
+// rest of the encoded data: the decoder has no macroblocks for the missing
+// rows and renders them as garbage — a half-broken picture.
+func (m *MP4Muxer) WriteSampleMulti(trackID int, nalus [][]byte, pts time.Duration, duration time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.closed {
+		return errors.New("muxer is closed")
+	}
+
+	t := m.trackByID(trackID)
+	if t == nil {
+		return fmt.Errorf("track %d not found", trackID)
+	}
+	if t.isAudio {
+		return fmt.Errorf("track %d is an audio track", trackID)
+	}
+
+	parts := make([][]byte, 0, len(nalus))
+	for _, nalu := range nalus {
+		if len(nalu) == 0 {
+			continue
+		}
+		parts = append(parts, nalu)
+	}
+	if len(parts) == 0 {
+		return errors.New("no NAL units to write")
+	}
+
+	_ = pts // arrival timestamp is not part of the MP4 timeline (durations are)
+	return m.appendSampleNALUs(t, parts, duration)
+}
+
 // WriteAudioSample writes a raw AAC frame as a sample to the specified audio track.
 func (m *MP4Muxer) WriteAudioSample(trackID int, data []byte, pts time.Duration, duration time.Duration) error {
 	m.mu.Lock()
@@ -320,8 +368,92 @@ func (m *MP4Muxer) appendSample(t *track, data []byte, duration time.Duration) e
 		size:     size,
 		duration: duration,
 	})
+	if !t.isAudio && isSyncSample(t, data) {
+		// stss is 1-indexed.
+		t.syncSamples = append(t.syncSamples, uint32(len(t.samples)))
+	}
 	m.totalDuration += duration
 	return nil
+}
+
+// isSyncSample reports whether the NAL unit opens a random access point:
+// an IDR slice for H.264, an IRAP picture for H.265.
+//
+// The sample numbers of these pictures form the file's sync-sample table
+// (stss). Without an stss box the MP4 spec's fallback applies — "every sample
+// is a sync sample" — and a demuxer that believes it hands ffmpeg an index in
+// which every frame is a valid seek target. A fast seek (-ss before -i, which
+// is what the recording download uses) then lands on an inter frame, the
+// decoder has no reference picture, and the clip starts mid-GOP: the first
+// GOP of every trimmed download renders as garbage.
+func isSyncSample(t *track, nalu []byte) bool {
+	if len(nalu) == 0 {
+		return false
+	}
+	if t.isH265 {
+		// nal_unit_type is bits 1..6 of the two-byte NAL header.
+		typ := (nalu[0] >> 1) & 0x3F
+		return typ >= 16 && typ <= 21 // IRAP: BLA_W_LP .. CRA_NUT
+	}
+	// H.264: nal_unit_type is the low 5 bits of the NAL header; 5 = IDR slice.
+	return nalu[0]&0x1F == 5
+}
+
+// appendSampleNALUs streams one video sample that carries several NAL units
+// (a multi-slice picture) to the output file and records its placement. Each
+// NAL unit gets its own 4-byte big-endian length prefix inside the sample.
+// Callers hold m.mu.
+func (m *MP4Muxer) appendSampleNALUs(t *track, nalus [][]byte, duration time.Duration) error {
+	if err := m.ensureOpen(); err != nil {
+		return err
+	}
+
+	var size uint32
+	for _, nalu := range nalus {
+		size += 4 + uint32(len(nalu))
+	}
+	if m.payloadN+int64(size) > mdatStcoLimit {
+		return errors.New("segment mdat exceeds 4GiB stco offset limit — rotate earlier")
+	}
+
+	// Absolute offset of this sample inside the file: mdat box starts at
+	// mdatSizeOff; its payload at +8 (past the size+type header).
+	offset := m.mdatSizeOff + 8 + m.payloadN
+	for _, nalu := range nalus {
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(nalu)))
+		if _, err := m.bw.Write(lenBuf[:]); err != nil {
+			return fmt.Errorf("stream sample prefix: %w", err)
+		}
+		if _, err := m.bw.Write(nalu); err != nil {
+			return fmt.Errorf("stream sample: %w", err)
+		}
+	}
+	m.payloadN += int64(size)
+
+	t.samples = append(t.samples, sample{
+		offset:   offset,
+		size:     size,
+		duration: duration,
+	})
+	if isSyncSampleNALUs(t, nalus) {
+		// stss is 1-indexed.
+		t.syncSamples = append(t.syncSamples, uint32(len(t.samples)))
+	}
+	m.totalDuration += duration
+	return nil
+}
+
+// isSyncSampleNALUs reports whether any NAL unit of the access unit opens a
+// random access point — a multi-slice picture is a sync picture when one of
+// its slices is an IDR / IRAP slice.
+func isSyncSampleNALUs(t *track, nalus [][]byte) bool {
+	for _, nalu := range nalus {
+		if isSyncSample(t, nalu) {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureOpen lazily creates the output file and writes the ftyp box plus the
@@ -538,7 +670,7 @@ func writeMvhd(w *mp4.Writer, tracks []*track) error {
 		if uint32(tr.id) >= nextID {
 			nextID = uint32(tr.id) + 1
 		}
-		d := trackDurationMs(tr)
+		d := trackDurationUnits(tr)
 		if d > maxDur {
 			maxDur = d
 		}
@@ -577,7 +709,7 @@ func writeTrak(w *mp4.Writer, tr *track) error {
 	}
 	tkhd := &mp4.Tkhd{
 		TrackID:    uint32(tr.id),
-		DurationV0: trackDurationMs(tr),
+		DurationV0: trackDurationUnits(tr),
 		Width:      uint32(tr.width) << 16,
 		Height:     uint32(tr.height) << 16,
 		Matrix: [9]int32{
@@ -617,7 +749,7 @@ func writeMdia(w *mp4.Writer, tr *track) error {
 	}
 	mdhd := &mp4.Mdhd{
 		Timescale:  defaultTimescale,
-		DurationV0: trackDurationMs(tr),
+		DurationV0: trackDurationUnits(tr),
 		Language:   [3]byte{0x15, 0xC0, 0x00}, // 'und' packed
 	}
 	if _, err := mp4.Marshal(w, mdhd, mp4.Context{}); err != nil {
@@ -788,30 +920,7 @@ func writeStbl(w *mp4.Writer, tr *track) error {
 	if err != nil {
 		return err
 	}
-	var sttsEntries []mp4.SttsEntry
-	if len(tr.samples) > 0 {
-		sttsEntries = make([]mp4.SttsEntry, 0, len(tr.samples))
-		prevDelta := uint32(tr.samples[0].duration.Milliseconds())
-		runCount := uint32(1)
-		for i := 1; i < len(tr.samples); i++ {
-			delta := uint32(tr.samples[i].duration.Milliseconds())
-			if delta == prevDelta {
-				runCount++
-				continue
-			}
-			sttsEntries = append(sttsEntries, mp4.SttsEntry{
-				SampleCount: runCount,
-				SampleDelta: prevDelta,
-			})
-			prevDelta = delta
-			runCount = 1
-		}
-		// Flush final run.
-		sttsEntries = append(sttsEntries, mp4.SttsEntry{
-			SampleCount: runCount,
-			SampleDelta: prevDelta,
-		})
-	}
+	sttsEntries := buildSttsEntries(tr.samples)
 	if _, err := mp4.Marshal(w, &mp4.Stts{EntryCount: uint32(len(sttsEntries)), Entries: sttsEntries}, mp4.Context{}); err != nil {
 		return err
 	}
@@ -819,6 +928,26 @@ func writeStbl(w *mp4.Writer, tr *track) error {
 		return err
 	}
 	_ = bi6
+
+	// stss (sync sample table) — the random access points of the track.
+	// Absent means "every sample is a sync sample" per the spec, which breaks
+	// seeking and trimming (see isSyncSample).
+	if !tr.isAudio && len(tr.syncSamples) > 0 {
+		bi7ss, err := w.StartBox(&mp4.BoxInfo{Type: mp4.StrToBoxType("stss")})
+		if err != nil {
+			return err
+		}
+		if _, err := mp4.Marshal(w, &mp4.Stss{
+			EntryCount:   uint32(len(tr.syncSamples)),
+			SampleNumber: tr.syncSamples,
+		}, mp4.Context{}); err != nil {
+			return err
+		}
+		if _, err := w.EndBox(); err != nil {
+			return err
+		}
+		_ = bi7ss
+	}
 
 	// stsc (streaming layout: every sample is its own chunk — tracks
 	// interleave in arrival order, so per-track contiguity is impossible)
@@ -1043,12 +1172,44 @@ func writeOpusSampleEntry(w *mp4.Writer, tr *track) error {
 
 // --- Helpers ---
 
-func trackDurationMs(tr *track) uint32 {
+// trackDurationUnits is the track's duration expressed in the track's
+// timescale ticks. The mdhd/tkhd durations are per-track values, so they must
+// use the same clock as the sample table — rounding them to milliseconds would
+// put the track duration out of step with its own stts.
+func trackDurationUnits(tr *track) uint32 {
 	d := uint32(0)
 	for _, s := range tr.samples {
-		d += uint32(s.duration.Milliseconds())
+		d += durationToTicks(s.duration)
 	}
 	return d
+}
+
+// durationToTicks converts a sample duration into MP4 timescale ticks.
+// The conversion rounds to nearest so that a 1/30 s frame becomes exactly
+// 3000 ticks at 90 kHz instead of 2999 — truncating every duration made the
+// track run slightly fast.
+func durationToTicks(d time.Duration) uint32 {
+	ticks := (d.Nanoseconds()*int64(defaultTimescale) + int64(time.Second)/2) / int64(time.Second)
+	if ticks < 1 {
+		ticks = 1
+	}
+	return uint32(ticks)
+}
+
+// buildSttsEntries run-length encodes the per-sample durations. A regular
+// capture collapses into a single entry, which keeps the moov small: one
+// entry per sample would add ~430 KB to the moov of a 30-minute segment.
+func buildSttsEntries(samples []sample) []mp4.SttsEntry {
+	entries := make([]mp4.SttsEntry, 0, 16)
+	for _, s := range samples {
+		ticks := durationToTicks(s.duration)
+		if n := len(entries); n > 0 && entries[n-1].SampleDelta == ticks {
+			entries[n-1].SampleCount++
+			continue
+		}
+		entries = append(entries, mp4.SttsEntry{SampleCount: 1, SampleDelta: ticks})
+	}
+	return entries
 }
 
 // --- SPS Resolution Parser ---

@@ -42,6 +42,7 @@ rolling*.go      # Rolling merge coordinator — per-camera window buckets, rete
 - **SHA-256 hash for SPS/PPS grouping**: `fmt.Sprintf("%x", sha256.Sum256(sps+pps+vps))`
 - **co64 atom support**: For merged files >4GB, uses `co64` box instead of `stco`
 - **stts compression**: Run-length encoded consecutive same-duration samples to reduce moov size
+- **Canonical video time base**: every merged track runs on 90 kHz (`mergeVideoTimescale`); each input's sample durations are converted into it (`scaleTicks`/`scaleSampleDurations`). Never take the output clock from the first input — mixing legacy 1/1000 recordings with 1/90000 ones would render the newer frames 90× too long. The audio time base is the sample rate and is therefore NOT rescaled: a mismatch drops the audio track
 - **SPS/PPS error returns**: `parseSPSResolution` and `parseHEVCSPSResolution` return `(int, int, error)`; never silently return (0, 0)
 - **BitReader bounds checking**: `readBit()`, `readBits()`, `readUE()`, `readSE()` return errors on overflow instead of corrupted zero values
 - **Deferred MJPEG deletion**: Source dirs deleted AFTER successful DB commit, not before

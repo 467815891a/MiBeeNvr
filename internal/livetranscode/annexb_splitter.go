@@ -66,7 +66,7 @@ type startCode struct {
 
 // naluInfo holds information about an extracted NALU.
 type naluInfo struct {
-	data []byte // the NALU bytes with EPB stripped (includes the header byte(s))
+	data []byte // the NALU bytes as they appear in the stream (EPB included)
 	typ  int    // NALU type (H.264: low 5 bits; H.265: bits 1-6)
 }
 
@@ -104,38 +104,19 @@ func isVCLH265(typ int) bool {
 
 // --------------- Emulation prevention ---------------
 
-// stripEPB removes emulation prevention bytes (0x03 inserted after 0x00 0x00)
-// from a NALU as specified in ITU-T H.264 §7.4.1.1 / H.265 §7.4.1.1.
+// NOTE on emulation prevention bytes (EPB, ITU-T H.264 §7.4.1.1):
 //
-// The encoder inserts 0x03 before any byte in {0x00, 0x01, 0x02, 0x03}
-// that follows a 0x00 0x00 sequence, to prevent false start codes.
-func stripEPB(data []byte) []byte {
-	// Fast path: check if any EPB exists
-	hasEPB := false
-	for i := 2; i < len(data); i++ {
-		if data[i-2] == 0 && data[i-1] == 0 && data[i] == 3 {
-			hasEPB = true
-			break
-		}
-	}
-	if !hasEPB {
-		return data
-	}
-
-	// Slow path: allocate result and copy with EPB removal
-	result := make([]byte, 0, len(data))
-	i := 0
-	for i < len(data) {
-		if i+2 < len(data) && data[i] == 0 && data[i+1] == 0 && data[i+2] == 3 {
-			result = append(result, 0, 0)
-			i += 3 // skip the 0x03
-		} else {
-			result = append(result, data[i])
-			i++
-		}
-	}
-	return result
-}
+// The encoder inserts 0x03 before any byte in {0x00, 0x01, 0x02, 0x03} that
+// follows a 0x00 0x00 sequence, so the NAL payload never contains a false
+// start code. That escaped form (EBSP) is what a DECODER expects, and what
+// MP4/AVCC (ISO 14496-15) stores in the sample table and in avcC.
+//
+// The EPBs must therefore survive the split. Stripping them (the previous
+// behaviour) rewrites the bitstream: the decoder un-escapes what it reads and
+// loses a real 0x03 byte, so the affected slice decodes into garbage —
+// "half the picture is corrupted" in the recorded file. Code that must parse
+// the RBSP itself (SPS parsing) does its own unescaping via
+// mediaprobe/muxer, not here.
 
 // --------------- Start code detection ---------------
 
@@ -181,8 +162,10 @@ func findStartCodes(buf []byte, codec Codec) ([]startCode, error) {
 
 // --------------- NALU extraction ---------------
 
-// extractNalus extracts individual NALUs from buf given the start code positions,
-// stripping emulation prevention bytes from each.
+// extractNalus extracts individual NALUs from buf given the start code positions.
+//
+// The NALU bytes are returned VERBATIM (emulation prevention bytes included) —
+// see the EPB note above.
 func extractNalus(buf []byte, codes []startCode, codec Codec) ([]naluInfo, error) {
 	if len(codes) == 0 {
 		return nil, ErrNoStartCode
@@ -207,7 +190,7 @@ func extractNalus(buf []byte, codes []startCode, codec Codec) ([]naluInfo, error
 		}
 
 		rawNalu := buf[naluStart:naluEnd]
-		nalu := stripEPB(rawNalu)
+		nalu := rawNalu
 
 		if len(nalu) == 0 {
 			continue
@@ -395,7 +378,8 @@ func extractParamSets(aus []AccessUnit, codec Codec) ParamSets {
 // extracted parameter sets, and any error encountered.
 //
 // The buffer must start with a valid Annex-B start code.
-// Emulation prevention bytes are automatically stripped from all returned NALUs.
+// The returned NALUs keep their emulation prevention bytes — that escaped form
+// is what decoders and MP4/AVCC expect (see the EPB note above).
 func SplitAnnexB(data []byte, codec Codec) ([]AccessUnit, ParamSets, error) {
 	if len(data) == 0 {
 		return nil, ParamSets{}, ErrEmptyBuffer
@@ -462,7 +446,8 @@ func (sp *AnnexBStreamParser) ParamSets() ParamSets {
 // ensuring correct AU boundary detection. The last incomplete AU is returned
 // by calling Flush() after all data has been fed.
 //
-// The returned access units have emulation prevention bytes stripped.
+// The returned access units keep their emulation prevention bytes (the escaped
+// form decoders and MP4/AVCC expect — see the EPB note above).
 func (sp *AnnexBStreamParser) Feed(chunk []byte) []AccessUnit {
 	if len(chunk) == 0 {
 		return nil
@@ -508,7 +493,7 @@ func (sp *AnnexBStreamParser) Feed(chunk []byte) []AccessUnit {
 		}
 
 		rawNalu := sp.buf[naluStart:naluEnd]
-		nalu := stripEPB(rawNalu)
+		nalu := rawNalu
 		if len(nalu) == 0 {
 			continue
 		}
@@ -610,3 +595,5 @@ func (sp *AnnexBStreamParser) Flush() []AccessUnit {
 	sp.buf = nil
 	return aus
 }
+
+

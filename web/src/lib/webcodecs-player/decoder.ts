@@ -102,41 +102,6 @@ export function prependAnnexB(nalus: Uint8Array[]): Uint8Array {
   return result;
 }
 
-/**
- * Build decoder description bytes (Annex B formatted parameter sets).
- *
- * H.264: SPS + PPS (each with start code prefix)
- * H.265: VPS + SPS + PPS (each with start code prefix)
- */
-function buildDescription(ci: CodecInfo): Uint8Array {
-  const parts: Uint8Array[] = [];
-
-  if (ci.codec === 'h265' && ci.vps) {
-    parts.push(START_CODE);
-    parts.push(ci.vps);
-  }
-  if (ci.sps.length > 0) {
-    parts.push(START_CODE);
-    parts.push(ci.sps);
-  }
-  if (ci.pps.length > 0) {
-    parts.push(START_CODE);
-    parts.push(ci.pps);
-  }
-
-  let totalLen = 0;
-  for (const part of parts) totalLen += part.byteLength;
-
-  const result = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-
-  return result;
-}
-
 // ─── Decoder class ──────────────────────────────────────────────────────────
 
 export class Decoder {
@@ -158,6 +123,12 @@ export class Decoder {
   private _backpressured = false;
   private _backpressureCallback: ((paused: boolean) => void) | null = null;
   private _decoderEpoch = 0;
+  // Mid-GOP start guard: after (re)configure, Chrome requires the first chunk
+  // to be a keyframe ("A key frame is required after configuration."). Frame
+  // delivery may resume mid-GOP (the keyframe replayed on subscribe can be
+  // dropped during the codec-ready pause), so delta chunks before the first
+  // keyframe must be dropped until an IDR arrives (≤1 GOP away).
+  private _sawKeyframe = false;
 
   // ─── Decode-stall detection ─────────────────────────────────────────────
   // _configuredAt stamps when configure() last succeeded with no output yet;
@@ -355,13 +326,19 @@ export class Decoder {
   private async _configureWebCodecs(ci: CodecInfo): Promise<void> {
     const codec = this.buildCodecString(ci);
 
+    // No `description`: the bitstream fed to decode() is Annex B (SPS/PPS ride
+    // in-band with each keyframe AU), and per the WebCodecs spec a config
+    // WITHOUT a description declares exactly that. Passing the Annex-B bytes
+    // as `description` instead makes Chrome try to parse them as an avcC
+    // record and fail ("Failed to parse avcC.") — the decoder closes and the
+    // player buffers forever.
+
     // Check if codec is supported
     if (typeof VideoDecoder !== 'undefined' && VideoDecoder.isConfigSupported) {
       const config: VideoDecoderConfig = {
         codec,
         codedWidth: DEFAULT_WIDTH,
         codedHeight: DEFAULT_HEIGHT,
-        description: buildDescription(ci),
       };
       const support = await VideoDecoder.isConfigSupported(config);
       if (!support.supported) {
@@ -379,12 +356,12 @@ export class Decoder {
       codec,
       codedWidth: DEFAULT_WIDTH,
       codedHeight: DEFAULT_HEIGHT,
-      description: buildDescription(ci),
     });
 
     this._configured = true;
     this._lastCodecInfo = ci;
     this._errorCount = 0;
+    this._sawKeyframe = false;
     this._armStallTimer();
   }
 
@@ -395,6 +372,7 @@ export class Decoder {
     this._configured = true;
     this._lastCodecInfo = ci;
     this._errorCount = 0;
+    this._sawKeyframe = false;
     this._armStallTimer();
   }
 
@@ -444,6 +422,16 @@ export class Decoder {
   /** Decode via WebCodecs. */
   private _decodeWebCodecs(nalus: Uint8Array[], pts: number, isKeyframe: boolean): void {
     if (!this._decoder || !this._configured) return;
+
+    // Mid-GOP start guard: deltas before the first post-configure keyframe are
+    // undecodable (Chrome rejects them) — drop until the IDR arrives.
+    if (!this._sawKeyframe) {
+      if (!isKeyframe) {
+        this._frameDropCount++;
+        return;
+      }
+      this._sawKeyframe = true;
+    }
 
     // Backpressure
     if (this._pendingDecodeCount >= BACKPRESSURE_THRESHOLD) {
@@ -656,9 +644,9 @@ export class Decoder {
             codec: this.buildCodecString(ci),
             codedWidth: DEFAULT_WIDTH,
             codedHeight: DEFAULT_HEIGHT,
-            description: buildDescription(ci),
           });
           this._configured = true;
+          this._sawKeyframe = false;
           this._errorCount = 0;
         } catch {
           this._decoder = null;

@@ -89,6 +89,10 @@ type IngestRecorder struct {
 	segStart   time.Time
 	lastFrame  time.Time
 	frameCount int
+	// lastPtsTicks is the source clock value of the previous picture (-1 when
+	// none was seen yet). The delta to the current picture gives the real
+	// frame duration — see sampleDuration.
+	lastPtsTicks int64
 	// paramGate bounds parameter-set-triggered segment rotations (#642) —
 	// decode-equivalent SPS variant flapping must not churn segments. Guarded
 	// by mu like the segment state above (WriteNALU callbacks are serialized
@@ -98,13 +102,15 @@ type IngestRecorder struct {
 	// rotation budget.
 	paramGate nalutil.ParamRotationGate
 
-	// Audio (WHIP push-in, #369). The negotiated format is set via SetAudioFormat
-	// when the publisher's audio track is accepted; frames then arrive via
-	// WriteAudio. audioTrackID is bound when a segment muxer is created (Opus
-	// track added alongside H.264).
-	audioCodec    string // "opus" or "" (no audio)
+	// Audio (WHIP push-in, #369 / UVC mic capture). The negotiated format is
+	// set via SetAudioFormat when the publisher's audio track is accepted or
+	// the UVC audio capturer starts; frames then arrive via WriteAudio.
+	// audioTrackID is bound when a segment muxer is created (Opus/AAC track
+	// added alongside H.264).
+	audioCodec    string // "opus", "aac", or "" (no audio)
 	audioSampleHz int
 	audioChans    int
+	audioConfig   []byte // codec setup bytes (AAC AudioSpecificConfig); nil for opus
 	audioTrackID  int
 }
 
@@ -130,6 +136,9 @@ func NewIngestRecorder(cfg IngestConfig) *IngestRecorder {
 	return &IngestRecorder{
 		cfg:   cfg,
 		auAsm: nalutil.NewAUAssembler(cfg.Encoding == "h265"),
+		// No source timestamp seen yet — the first picture falls back to the
+		// arrival gap.
+		lastPtsTicks: -1,
 	}
 }
 
@@ -190,7 +199,16 @@ func (r *IngestRecorder) AudioCodec() string {
 
 // AudioConfig returns audio config bytes. Always nil for ingest — Opus needs
 // no out-of-band config (the browser decoder self-configures from the stream).
-func (r *IngestRecorder) AudioConfig() []byte { return nil }
+// AudioConfig returns the codec setup bytes (AAC AudioSpecificConfig) or nil
+// when the codec needs none (Opus is self-describing).
+func (r *IngestRecorder) AudioConfig() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.audioConfig == nil {
+		return nil
+	}
+	return append([]byte(nil), r.audioConfig...)
+}
 
 // AudioSampleRate returns the negotiated audio sample rate (48000 for Opus).
 func (r *IngestRecorder) AudioSampleRate() int {
@@ -207,13 +225,14 @@ func (r *IngestRecorder) AudioChannels() int {
 }
 
 // SetAudioFormat records the audio format negotiated by a push publisher
-// (WHIP OnTrack). Call before frames arrive; later calls are ignored so a
-// renegotiation mid-stream can't swap the muxer's track format. Only "opus"
-// is supported — G.711 push-in has no producer today.
+// (WHIP OnTrack) or the local UVC audio capturer. Call before frames arrive;
+// later calls are ignored so a renegotiation mid-stream can't swap the
+// muxer's track format. Supported codecs: "opus" (WHIP) and "aac" (UVC mic
+// capture) — G.711 push-in has no producer today.
 func (r *IngestRecorder) SetAudioFormat(codec string, sampleRate, channels int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.audioCodec != "" || codec != "opus" {
+	if r.audioCodec != "" || (codec != "opus" && codec != "aac") {
 		return
 	}
 	if sampleRate <= 0 {
@@ -229,6 +248,15 @@ func (r *IngestRecorder) SetAudioFormat(codec string, sampleRate, channels int) 
 		"camera_id", r.cfg.CameraID, "codec", codec, "sample_rate", sampleRate, "channels", channels)
 }
 
+// SetAudioConfig stores codec-specific setup bytes (e.g. the 2-byte
+// AudioSpecificConfig for AAC) announced to WS clients alongside the codec.
+// Must be called after SetAudioFormat.
+func (r *IngestRecorder) SetAudioConfig(config []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.audioConfig = append([]byte(nil), config...)
+}
+
 // WriteAudio ingests one raw audio frame from a push publisher (#369).
 // ptsTicks is on the audio RTP clock (48 kHz for Opus) — used for the hub
 // fan-out so live consumers pace themselves; the MP4 sample uses wall-clock
@@ -241,7 +269,7 @@ func (r *IngestRecorder) WriteAudio(codec string, ptsTicks int64, data []byte, d
 				"camera_id", r.cfg.CameraID, "panic", panicErr)
 		}
 	}()
-	if codec != "opus" || len(data) == 0 {
+	if (codec != "opus" && codec != "aac") || len(data) == 0 {
 		return
 	}
 	if dur < time.Millisecond {
@@ -253,11 +281,15 @@ func (r *IngestRecorder) WriteAudio(codec string, ptsTicks int64, data []byte, d
 	m := r.muxer
 	aid := r.audioTrackID
 	start := r.segStart
+	audioModel := model.AudioOpus
+	if codec == "aac" {
+		audioModel = model.AudioAAC
+	}
 	r.mu.Unlock()
 
 	// Live fan-out (outside lock, hub is non-blocking by design).
 	if hub != nil {
-		hub.BroadcastAudio(ptsTicks, model.AudioOpus, data)
+		hub.BroadcastAudio(ptsTicks, audioModel, data)
 	}
 
 	// Live-only mode: skip all segment I/O (mirrors the WriteNALU gate).
@@ -460,6 +492,34 @@ func (r *IngestRecorder) cacheParamSets(au [][]byte) {
 	}
 }
 
+// sampleDuration returns the duration of the sample that carries ptsTicks.
+//
+// The duration comes from the SOURCE clock, not from the gap between two
+// arrival callbacks. The ingest pipe hands pictures over in bursts — ffmpeg's
+// output buffering groups a couple of frames into one read — so the arrival
+// gap alternates between ~1 ms and ~60 ms. Feeding those gaps into the MP4
+// timeline produced a stts full of 1 ms and 280 ms samples, which players
+// resolve into duplicated/negative timestamps ("non monotonically increasing
+// dts" from ffmpeg) and a visible stutter. The source clock advances by
+// exactly one frame period per picture, so its deltas are the real ones.
+//
+// arrivalGap is the fallback for sources that do not stamp timestamps (or for
+// the very first picture of a stream).
+func (r *IngestRecorder) sampleDuration(ptsTicks int64, arrivalGap time.Duration) time.Duration {
+	r.mu.Lock()
+	prev := r.lastPtsTicks
+	r.lastPtsTicks = ptsTicks
+	r.mu.Unlock()
+
+	if prev >= 0 && ptsTicks > prev {
+		return time.Duration(ptsTicks-prev) * time.Second / 90000
+	}
+	if arrivalGap < time.Millisecond {
+		return time.Millisecond
+	}
+	return arrivalGap
+}
+
 // writeAssembledAU fans one picture-complete AU out to the StreamHub and the
 // rolling segment. Called synchronously by the AUAssembler.
 func (r *IngestRecorder) writeAssembledAU(au [][]byte, ptsTicks int64) {
@@ -528,28 +588,31 @@ func (r *IngestRecorder) writeAssembledAU(au [][]byte, ptsTicks int64) {
 		return
 	}
 
-	// ---- Find VCL NALU to write to disk ----
+	// ---- Find VCL NALUs to write to disk ----
 	// H.264: type 1 (non-IDR) or 5 (IDR). H.265: any VCL type (0-31, IDR/WPP
 	// slices are 16-21 — the AU carries one VCL NALU per picture here).
-	var vclNALU []byte
+	//
+	// EVERY VCL NALU of the picture is kept: a picture may span several slices
+	// (libx264's sliced-threads emits 4 slice NALUs for 1080p), and writing
+	// only the first one drops the rest of the encoded data — the decoder then
+	// renders the missing macroblock rows as garbage.
+	var vclNALUs [][]byte
 	for _, nalu := range au {
 		if len(nalu) == 0 {
 			continue
 		}
 		if r.isH265() {
 			if (nalu[0]>>1)&0x3F < 32 {
-				vclNALU = nalu
-				break
+				vclNALUs = append(vclNALUs, nalu)
 			}
 		} else {
 			naluType := nalu[0] & 0x1F
 			if naluType == 5 || naluType == 1 {
-				vclNALU = nalu
-				break
+				vclNALUs = append(vclNALUs, nalu)
 			}
 		}
 	}
-	if vclNALU == nil {
+	if len(vclNALUs) == 0 {
 		return
 	}
 
@@ -624,8 +687,9 @@ func (r *IngestRecorder) writeAssembledAU(au [][]byte, ptsTicks int64) {
 				return
 			}
 		}
-		// Opus audio track (#369): config = 1 byte channels + 2 bytes PreSkip +
-		// 4 bytes InputSampleRate (big-endian) — see muxer.AddAudioTrack.
+		// Audio track (#369): Opus config = 1 byte channels + 2 bytes PreSkip +
+		// 4 bytes InputSampleRate (big-endian); AAC config = the 2-byte
+		// AudioSpecificConfig — see muxer.AddAudioTrack.
 		r.mu.Lock()
 		var newAudioTrackID int
 		if r.audioCodec == "opus" {
@@ -636,6 +700,14 @@ func (r *IngestRecorder) writeAssembledAU(au [][]byte, ptsTicks int64) {
 			aid, aerr := newMux.AddAudioTrack("opus", opusCfg)
 			if aerr != nil {
 				ingestLogger.Warn("failed to add opus track — recording video-only",
+					"camera_id", r.cfg.CameraID, "error", aerr)
+			} else {
+				newAudioTrackID = aid
+			}
+		} else if r.audioCodec == "aac" {
+			aid, aerr := newMux.AddAudioTrack("aac", r.audioConfig)
+			if aerr != nil {
+				ingestLogger.Warn("failed to add aac track — recording video-only",
 					"camera_id", r.cfg.CameraID, "error", aerr)
 			} else {
 				newAudioTrackID = aid
@@ -668,16 +740,13 @@ func (r *IngestRecorder) writeAssembledAU(au [][]byte, ptsTicks int64) {
 	// ---- Write sample (muxer has its own mutex) ----
 	now := time.Now()
 	pts := now.Sub(segStart)
-	dur := now.Sub(lastFrame)
-	if dur < time.Millisecond {
-		dur = time.Millisecond
-	}
+	dur := r.sampleDuration(ptsTicks, now.Sub(lastFrame))
 
 	r.mu.Lock()
 	r.lastFrame = now
 	r.mu.Unlock()
 
-	if err := curMux.WriteSample(trackID, vclNALU, pts, dur); err != nil {
+	if err := curMux.WriteSampleMulti(trackID, vclNALUs, pts, dur); err != nil {
 		ingestLogger.Error("failed to write sample", "camera_id", r.cfg.CameraID, "error", err)
 		return
 	}

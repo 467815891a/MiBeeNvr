@@ -184,12 +184,12 @@ func TestSplitH264EmulationPrevention(t *testing.T) {
 	// AU[0]: SPS + IDR
 	requireAUNALUCount(t, aus[0], 2)
 
-	// SPS EPB stripped: 00 00 03 00 -> 00 00 00
-	// Expected SPS after EPB removal
-	expectedSPS := h264NAL(7, []byte{0x00, 0x00, 0x00, 0x01, 0x02})
-	require.Equal(t, expectedSPS, ps.SPS)
-	// Also verify NALU 0 in AU[0] has EPB stripped
-	require.Equal(t, expectedSPS, aus[0][0], "SPS NALU should have EPB stripped")
+	// The EPB MUST survive the split: the escaped form is what a decoder
+	// expects and what MP4/AVCC stores. Stripping it rewrites the bitstream —
+	// the decoder then un-escapes 0x00 0x00 0x03 into 0x00 0x00 and loses a
+	// real byte, which is what made recorded frames decode into garbage.
+	require.Equal(t, sps, ps.SPS, "SPS NALU must keep its emulation prevention bytes")
+	require.Equal(t, sps, aus[0][0], "SPS NALU must keep its emulation prevention bytes")
 
 	// AU[1]: P-slice
 	requireAUNALUCount(t, aus[1], 1)

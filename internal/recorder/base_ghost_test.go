@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -45,6 +46,14 @@ func (d *ghostCountingDB) count() int {
 // recordings list. closeCurrentSegment must NOT insert a row (nor publish a
 // SegmentCompleted event) when the final file never materialized.
 func TestCloseCurrentSegment_NoGhostRowWhenTempVanished(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The test simulates the vanish by os.Remove-ing the .tmp WHILE the
+		// muxer still holds it open — that only works on POSIX (unlinked
+		// inode). Windows refuses to unlink an open file, so the precondition
+		// itself is unrepresentable there; the ghost-row logic is identical
+		// on both platforms.
+		t.Skip("requires POSIX unlinked-inode semantics (os.Remove on an open file)")
+	}
 	store, err := storage.NewManager(t.TempDir())
 	require.NoError(t, err)
 

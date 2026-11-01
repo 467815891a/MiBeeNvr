@@ -73,16 +73,17 @@ func TestSttsRunLengthEncoded(t *testing.T) {
 	entries := readSttsEntries(t, path)
 	require.Len(t, entries, 2, "two duration runs must compress to two stts entries")
 	require.Equal(t, uint32(3), entries[0].SampleCount)
-	require.Equal(t, uint32(33), entries[0].SampleDelta)
+	// 33ms and 40ms expressed in the 90 kHz track time base.
+	require.Equal(t, uint32(2970), entries[0].SampleDelta)
 	require.Equal(t, uint32(2), entries[1].SampleCount)
-	require.Equal(t, uint32(40), entries[1].SampleDelta)
+	require.Equal(t, uint32(3600), entries[1].SampleDelta)
 
 	// Lossless through the consumer path: the parser must expand the runs
 	// back to the exact per-sample durations.
 	info, err := mediaprobe.ParseSegment(path)
 	require.NoError(t, err)
 	require.Equal(t, 5, info.SampleCount)
-	want := []uint32{33, 33, 33, 40, 40}
+	want := []uint32{2970, 2970, 2970, 3600, 3600}
 	for i, w := range want {
 		require.Equal(t, w, info.Samples[i].Duration, "expanded stts must preserve sample %d duration", i)
 	}

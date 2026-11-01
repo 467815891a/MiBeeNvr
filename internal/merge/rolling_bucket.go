@@ -439,7 +439,7 @@ func (r *RollingMergeCoordinator) foldAppendBucket(
 
 	srcs := make([]AppendSource, 0, len(run))
 	for _, fs := range run {
-		srcs = append(srcs, AppendSource{Path: fs.seg.filePath, Samples: fs.info.Samples})
+		srcs = append(srcs, AppendSource{Path: fs.seg.filePath, Samples: fs.info.Samples, Timescale: fs.info.Timescale})
 	}
 	ast, aerr := ab.AppendBatch(r.resolveTimelapseCadence(cameraID), r.resolveTimelapseGap(cameraID), srcs)
 	if aerr != nil {

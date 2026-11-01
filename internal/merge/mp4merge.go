@@ -159,6 +159,106 @@ var (
 	TimelapseFrameDur     = 100 * time.Millisecond
 )
 
+// mergeVideoTimescale is the canonical time base of merged video tracks.
+//
+// Every input segment's sample durations are converted into it before they are
+// written, so a merge that mixes recordings made under different time bases
+// (legacy 1/1000 files and post-fix 1/90000 files) still yields one coherent
+// timeline. Without the conversion the output track's clock would be applied
+// to durations expressed in each segment's own clock: a legacy (1000) segment
+// next to a new (90000) one renders the new frames 90x too long — 3 s per
+// frame, a file that plays 90x too slow.
+//
+// 90 kHz is the MPEG-TS clock and divides 25/30/50/60 fps exactly, so the
+// conversion introduces no rounding drift.
+const mergeVideoTimescale = 90000
+
+// mergeFallbackTimescale is the legacy millisecond base. It is used only when
+// a merged span is long enough that its duration would overflow the 32-bit
+// duration fields of mvhd/mdhd at 90 kHz (>13.25 h) — rolling windows are
+// capped at 1 h, so this is a safety net for hand-rolled merges, not a path
+// the rolling coordinator can reach.
+const mergeFallbackTimescale = 1000
+
+// scaleTicks converts a duration from one time base to another, rounding to
+// the nearest tick. A non-zero duration never collapses to zero: a zero
+// delta makes the demuxer emit a non-increasing DTS, which is exactly the
+// class of defect this conversion exists to avoid.
+func scaleTicks(d, from, to uint32) uint32 {
+	if d == 0 || from == to || from == 0 {
+		return d
+	}
+	v := (uint64(d)*uint64(to) + uint64(from)/2) / uint64(from)
+	if v == 0 {
+		v = 1
+	}
+	if v > math.MaxUint32 {
+		v = math.MaxUint32
+	}
+	return uint32(v)
+}
+
+// scaleSampleDurations returns a copy of samples whose durations are
+// expressed in the target time base. The input slice is left untouched — the
+// caller keeps ownership of the parsed segment (the same segment is re-read
+// by later merge stages).
+func scaleSampleDurations(samples []SampleEntry, from, to uint32) []SampleEntry {
+	if from == to || from == 0 {
+		return samples
+	}
+	out := make([]SampleEntry, len(samples))
+	copy(out, samples)
+	for i := range out {
+		out[i].Duration = scaleTicks(out[i].Duration, from, to)
+	}
+	return out
+}
+
+// resolveOutputTimescale picks the time base of the merged video track. The
+// canonical base is mergeVideoTimescale (90 kHz); the legacy millisecond base
+// is used only when the span is too long for mvhd/mdhd's 32-bit duration.
+func resolveOutputTimescale(segments []*SegmentInfo) (uint32, error) {
+	outTS := uint32(mergeVideoTimescale)
+	var spanSec float64
+	for _, seg := range segments {
+		if seg.Timescale == 0 {
+			return 0, fmt.Errorf("segment has no video timescale")
+		}
+		var ticks uint64
+		for _, s := range seg.Samples {
+			ticks += uint64(s.Duration)
+		}
+		spanSec += float64(ticks) / float64(seg.Timescale)
+	}
+	if spanSec*float64(outTS) > float64(math.MaxUint32) {
+		// Longer than mvhd/mdhd's 32-bit duration can express at 90 kHz —
+		// fall back to the legacy millisecond base so the merge still
+		// produces a playable file.
+		outTS = mergeFallbackTimescale
+		logger.Warn("merge: span exceeds 90 kHz duration range, using millisecond time base",
+			"span_s", spanSec)
+	}
+	return outTS, nil
+}
+
+// normalizeVideoTimescale rewrites every segment's video sample table into the
+// merged output time base and returns a copy of the segment list. The copy is
+// deliberate: the caller's SegmentInfo describes the file on disk and the same
+// segment is re-read by the bucket bookkeeping after the merge, so the parsed
+// data must stay untouched. The audio track keeps its own time base — for audio
+// the timescale IS the sample rate and rescaling it would change the playback
+// speed.
+func normalizeVideoTimescale(segments []*SegmentInfo, outTS uint32) []*SegmentInfo {
+	out := make([]*SegmentInfo, len(segments))
+	for i, seg := range segments {
+		cp := *seg
+		cp.Timescale = outTS
+		cp.Samples = scaleSampleDurations(seg.Samples, seg.Timescale, outTS)
+		out[i] = &cp
+	}
+	return out
+}
+
 // AlignToKeyframe trims seg's leading video samples up to (and including the
 // position of) its first keyframe and trims the audio head by the same wall
 // duration so A/V still start together. A segment that starts mid-GOP
@@ -260,6 +360,17 @@ func MergeMP4Segments(ctx context.Context, segments []*SegmentInfo, outputPath s
 	if err != nil {
 		return stats, err
 	}
+
+	// --- Output video time base -------------------------------------------
+	// The merged track runs on ONE clock; every input's sample durations are
+	// converted into it. The output clock used to be taken from the first
+	// segment, which silently mis-scaled every other segment whenever the
+	// inputs disagreed (legacy 1/1000 files next to 1/90000 ones).
+	outTS, err := resolveOutputTimescale(segments)
+	if err != nil {
+		return stats, err
+	}
+	segments = normalizeVideoTimescale(segments, outTS)
 
 	out, err := os.Create(outputPath)
 	if err != nil {
@@ -375,6 +486,13 @@ func validateMergeInputs(segments []*SegmentInfo) (codec string, hasAudio bool, 
 		}
 		if seg.HasAudio && !bytes.Equal(seg.AudioConfig, audioConfig) {
 			// Different audio codec config — also treat as mixed.
+			audioMixed = true
+		}
+		if seg.HasAudio && hasAudio && seg.AudioTimescale != first.AudioTimescale {
+			// Different audio time base. For audio the timescale IS the
+			// sample rate, so it cannot be rescaled the way the video time
+			// base is — converting it would change the playback speed.
+			// Treat it like a config mismatch and drop audio.
 			audioMixed = true
 		}
 	}
@@ -603,6 +721,8 @@ func streamVideoSamples(ctx context.Context, out io.Writer, segments []*SegmentI
 			// cameras' normal inter-frame gaps must not read as TL dwells.
 			gap = frameDur[1]
 		}
+		// Thresholds live in the OUTPUT time base — the durations they are
+		// compared against were converted into it above.
 		gapTicks := float64(seg.Timescale) * gap.Seconds()
 		frameTicks := uint32(float64(seg.Timescale) * cadence.Seconds())
 

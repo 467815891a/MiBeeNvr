@@ -274,7 +274,7 @@ func CreateAppendBucket(path string, info *SegmentInfo, cfg AppendBucketConfig) 
 	b := &AppendBucket{
 		f:         f,
 		path:      path,
-		timescale: info.Timescale,
+		timescale: mergeVideoTimescale,
 		layout: appendBucketLayout{
 			videoSampleCap: sampleCap,
 			chunkCap:       chunkCap,
@@ -339,7 +339,7 @@ func writeReservedMoov(rec *offsetWriter, info *SegmentInfo, base int64, l *appe
 		sps:       info.SPS,
 		pps:       info.PPS,
 		vps:       info.VPS,
-		timescale: info.Timescale,
+		timescale: mergeVideoTimescale,
 	}
 	// tkhd 宽高必须从首段 SPS 解析写入真实值（2026-09-24 现场回归）：
 	// 写 0 时 ffprobe/VLC 可从码流兜底播放，但 Chromium 一族严格读 tkhd
@@ -406,7 +406,7 @@ func writeReservedMoov(rec *offsetWriter, info *SegmentInfo, base int64, l *appe
 		return err
 	}
 	if _, err := mp4.Marshal(w, &mp4.Mdhd{
-		Timescale: info.Timescale,
+		Timescale: mergeVideoTimescale,
 		Language:  [3]byte{0x15, 0xC0, 0x00}, // 'und' packed
 	}, mp4.Context{}); err != nil {
 		return err
@@ -687,8 +687,9 @@ func readU32(f *os.File, off int64) uint32 {
 
 // AppendSource 是一次追加的一个来源段（Sample.Offset 相对来源文件）。
 type AppendSource struct {
-	Path    string
-	Samples []SampleEntry
+	Path     string
+	Samples  []SampleEntry
+	Timescale uint32 // 来源段的视频时基（样本时长单位）
 }
 
 // AppendStats 报告本次追加的两轴贡献（上层墙钟记账复用经典口径）。
@@ -754,13 +755,21 @@ func (b *AppendBucket) AppendBatch(cadence, gap time.Duration, srcs []AppendSour
 		}
 		samples := make([]SampleEntry, len(srcs[i].Samples))
 		copy(samples, srcs[i].Samples)
+		// The bucket runs on ONE clock; a source recorded under a different
+		// time base (legacy 1/1000 next to 1/90000) has its durations
+		// converted in, otherwise its frames land 90x off (or 90x too long).
+		if srcs[i].Timescale != 0 && srcs[i].Timescale != b.timescale {
+			for j := range samples {
+				samples[j].Duration = scaleTicks(samples[j].Duration, srcs[i].Timescale, b.timescale)
+			}
+		}
 		for j := range samples {
 			d := samples[j].Duration
 			if b.timescale > 0 && frameTicks > 0 && float64(d) > gapTicks {
 				d = frameTicks
 			}
+			st.WallTicks += uint64(samples[j].Duration)
 			samples[j].Duration = d
-			st.WallTicks += uint64(srcs[i].Samples[j].Duration)
 			st.FileTicks += uint64(d)
 			st.Bytes += int64(samples[j].Size)
 			if d != prevDelta {
